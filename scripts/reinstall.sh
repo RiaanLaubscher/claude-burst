@@ -18,7 +18,7 @@
 set -uo pipefail
 
 SHARE="$HOME/.local/share/claude-burst"
-URL="https://github.com/andrewbakercloudscale/claude-burst.git"
+URL="https://github.com/RiaanLaubscher/claude-burst.git"
 
 fail() { print -u2 "burst-reinstall: $1"; print -u2 "Claude Code not working meanwhile? burst-off takes Burst out of the path."; exit 1; }
 
