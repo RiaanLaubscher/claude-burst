@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -125,7 +126,8 @@ type Server struct {
 	clientAuth
 	// resolver resolves the intercepted host bypassing /etc/hosts; nil
 	// outside transparent mode.
-	resolver *interceptResolver
+	resolver        *interceptResolver
+	browserUpstream *url.URL
 }
 
 // Logf writes one line to the gateway log, for other components (the
@@ -258,6 +260,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.browserToUpstream(r) {
+		s.passBrowserThrough(w, r)
+		return
+	}
 	// Before the body is read: a refused request must cost nothing, and
 	// above all must never reach a provider. See guard.go.
 	if reason := s.requestRefusal(r); reason != "" {
