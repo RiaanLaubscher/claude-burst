@@ -356,7 +356,7 @@ func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := probeClient(5 * time.Second)
 	url := "https://" + cfg.Intercept.Host + "/healthz"
 	resp, err := client.Get(url)
 	if err != nil {
@@ -381,6 +381,12 @@ func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 		Detail: fmt.Sprintf("%s answered (HTTP %d) but NOT from this gateway -- the machine-wide redirect is not installed, so real Claude Code traffic is going straight to Anthropic, bypassing burst entirely. Run: sudo %s install --host %s --gateway-port %s",
 			url, resp.StatusCode, s.rootHelper, cfg.Intercept.Host, gatewayPort(cfg.Listen)),
 	})
+}
+
+func probeClient(timeout time.Duration) *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DisableKeepAlives = true
+	return &http.Client{Timeout: timeout, Transport: t}
 }
 
 // gatewayPort extracts the port from a "host:port" listen address, falling
