@@ -14,14 +14,14 @@
 # Safe to run any time; it asks before stopping sessions and sudo asks for
 # the password where /etc/hosts and pf change. Works piped from GitHub:
 #
-#   curl -fsSL https://raw.githubusercontent.com/andrewbakercloudscale/claude-burst/main/scripts/repair.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/RiaanLaubscher/claude-burst/main/scripts/repair.sh | bash
 #
 # If it cannot fix things, `burst-off` takes Burst out of the path.
 
 set -uo pipefail
 CFG="$HOME/.config/claude-burst"
 LABEL="ninja.andrewbaker.claude-burst"
-GH="https://github.com/andrewbakercloudscale/claude-burst.git"
+GH="https://github.com/RiaanLaubscher/claude-burst.git"
 STEP="starting"
 # audit records how this ended in the audit trail (the Audit tab). REPO is
 # set further down; before that there is no script to call and nothing ran.

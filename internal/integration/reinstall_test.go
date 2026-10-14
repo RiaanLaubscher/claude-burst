@@ -112,7 +112,7 @@ func TestBurstReinstallClonesWhenTheCheckoutIsGone(t *testing.T) {
 	// Point the clone at the test's origin instead of GitHub.
 	b, err := os.ReadFile(filepath.Join(share, "reinstall.sh"))
 	must(t, err)
-	must(t, os.WriteFile(filepath.Join(share, "reinstall.sh"), []byte(strings.Replace(string(b), "https://github.com/andrewbakercloudscale/claude-burst.git", r.origin, 1)), 0o755))
+	must(t, os.WriteFile(filepath.Join(share, "reinstall.sh"), []byte(strings.Replace(string(b), "https://github.com/RiaanLaubscher/claude-burst.git", r.origin, 1)), 0o755))
 	if out := r.reinstall(); !strings.Contains(out, "installed v2 from") || !strings.Contains(out, "claude-burst/src") {
 		t.Fatalf("want a fresh clone installed:\n%s", out)
 	}
@@ -186,7 +186,7 @@ func TestBurstReinstallInstallsOnlyASignedRelease(t *testing.T) {
 		share := filepath.Join(r.home, ".local", "share", "claude-burst")
 		b, err := os.ReadFile(filepath.Join(share, "reinstall.sh"))
 		must(t, err)
-		must(t, os.WriteFile(filepath.Join(share, "reinstall.sh"), []byte(strings.Replace(string(b), "https://github.com/andrewbakercloudscale/claude-burst.git", r.origin, 1)), 0o755))
+		must(t, os.WriteFile(filepath.Join(share, "reinstall.sh"), []byte(strings.Replace(string(b), "https://github.com/RiaanLaubscher/claude-burst.git", r.origin, 1)), 0o755))
 		r.push("owned")
 		r.git(r.origin, "tag", "v3")
 		out, err := r.run(filepath.Join(r.home, ".local", "bin", "burst-reinstall"))
