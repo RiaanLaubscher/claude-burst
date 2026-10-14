@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/andrewbakercloudscale/claude-burst/internal/ctxview"
 	"io"
@@ -288,6 +289,25 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.logger.Printf("req=%s error stage=read_body reason=too_large limit_mb=%d actual_bytes=%d", rid, s.cfg.MaxRequestMB, len(body))
 		http.Error(w, fmt.Sprintf("request exceeds configured max_request_mb=%d", s.cfg.MaxRequestMB), http.StatusRequestEntityTooLarge)
 		return
+	}
+	// Claude Code gzips /v1/messages bodies (CLAUDE_CODE_GZIP_REQUEST_BODIES,
+	// or its server-side rollout). Everything below reads the body as JSON --
+	// the model, automask, compaction -- so it is decoded here and sent on
+	// uncompressed. Left encoded, every one of them silently saw nothing.
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Content-Encoding")), "gzip") {
+		plain, err := gunzipLimited(body, maxBytes)
+		if errors.Is(err, errBodyTooLarge) {
+			s.logger.Printf("req=%s error stage=read_body reason=too_large_decoded limit_mb=%d", rid, s.cfg.MaxRequestMB)
+			http.Error(w, fmt.Sprintf("request exceeds configured max_request_mb=%d", s.cfg.MaxRequestMB), http.StatusRequestEntityTooLarge)
+			return
+		}
+		if err != nil {
+			s.logger.Printf("req=%s error stage=read_body reason=bad_gzip err=%v", rid, err)
+			http.Error(w, "failed decoding gzip request body", http.StatusBadRequest)
+			return
+		}
+		body = plain
+		r.Header.Del("Content-Encoding")
 	}
 
 	// ONE RULE, applied twice below: a request that cannot fail over does not
