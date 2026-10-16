@@ -72,9 +72,9 @@ async function rescue($, c) {
   try {
     const r = await $.process.run(['open', '-a', 'Terminal', path])
     if (r && r.exitCode) throw new Error((r.stderr || 'exit ' + r.exitCode).trim())
-    $.ui.toast(c.started)
+    toast($, c.started)
   } catch (err) {
-    $.ui.toast('Could not run ' + path + ' (' + err + '). Run ./install.sh in the claude-burst checkout')
+    toast($, 'Could not run ' + path + ' (' + err + '). Run ./install.sh in the claude-burst checkout', 'error')
   }
 }
 
@@ -266,7 +266,7 @@ async function leaveBurst($) {
     if (h.full) await compactFast($)
     else await handOver($, h)
   } catch (err) {
-    $.ui.toast((out ? 'This session no longer goes through Burst and sends its whole history (' + kTokens(raw) + ')' : 'Claude Code holds ' + kTokens(raw) + ' of history for this session, close to more than it could send without Burst') + '. /compact shortens it with the summary Burst already wrote', { timeoutMs: TOAST_MS.warn })
+    toast($, (out ? 'This session no longer goes through Burst and sends its whole history (' + kTokens(raw) + ')' : 'Claude Code holds ' + kTokens(raw) + ' of history for this session, close to more than it could send without Burst') + '. /compact shortens it with the summary Burst already wrote', 'warn')
   }
 }
 
@@ -299,14 +299,14 @@ async function taken($, h) {
 const FAST = 'compact-async-full'
 async function compactFast($) {
   if (asking) return
-  if (!(await handoffOn($))) return $.ui.toast("/" + FAST + " is off: turn on Hand Burst's summary to Claude Code on the dashboard", { timeoutMs: TOAST_MS.warn })
+  if (!(await handoffOn($))) return toast($, "/" + FAST + " is off: turn on Hand Burst's summary to Claude Code on the dashboard", 'warn')
   const h = await readHandoff($)
-  if (!h) return $.ui.toast(tookIn ? ALREADY : 'Burst holds no summary of this session yet: nothing compacted', { timeoutMs: TOAST_MS.warn })
+  if (!h) return toast($, tookIn ? ALREADY : 'Burst holds no summary of this session yet: nothing compacted', 'warn')
   handed = h.of
   try {
     await handOver($, h)
   } catch (err) {
-    $.ui.toast('/' + FAST + ' could not run /compact: ' + err, { timeoutMs: TOAST_MS.warn })
+    toast($, '/' + FAST + ' could not run /compact: ' + err, 'error')
   }
 }
 
@@ -363,7 +363,7 @@ export function register(on) {
     handed = h.of
     tookIn = true
     await taken($, h)
-    $.ui.toast("Async Full Compaction: " + cut + ' messages replaced with the summary Burst already wrote', { timeoutMs: TOAST_MS.info })
+    toast($, "Async Full Compaction: " + cut + ' messages replaced with the summary Burst already wrote')
     return { messages: [{ role: 'user', text: h.lead, toolUses: [] }, ...e.messages.slice(cut).map(asNewIfResult)] }
   })
 
@@ -437,7 +437,7 @@ export function register(on) {
       band = !band
       try { await $.store.set(BAND_KEY, band) } catch (err) { $.ui.log('could not save the band choice: ' + err) }
       $.ui.invalidate('ui.render')
-      $.ui.toast(band ? 'Burst band above the prompt' : 'Burst band off: the sidebar has it')
+      toast($, band ? 'Burst band above the prompt' : 'Burst band off: the sidebar has it')
       return {}
     }
     await $.ui.open({ id: PANE, title: 'Burst', focus: true, closeOnEscape: true })
@@ -461,7 +461,11 @@ export function register(on) {
 
   on('command.run', { command: PRUNE }, async ($, e) => {
     await follow($)
-    $.ui.toast(await prune($, e && e.args), { timeoutMs: TOAST_MS.error })
+    // What it did is read at leisure, so it stays as long as an error; one
+    // that did nothing is marked as a problem.
+    const said = await prune($, e && e.args)
+    const level = /^Nothing pruned: the /.test(said) ? 'error' : /^Nothing pruned/.test(said) ? 'warn' : 'info'
+    toast($, said, level, TOAST_MS.error)
     return {}
   })
 
@@ -503,7 +507,7 @@ export function register(on) {
     rows.push(Button({
       key: 'dashboard', label: 'd: Open the dashboard', hotkey: 'd', plain: true,
       onPress: async () => {
-        try { await $.process.run(['open', DASHBOARD]) } catch (err) { $.ui.toast('could not open the dashboard') }
+        try { await $.process.run(['open', DASHBOARD]) } catch (err) { toast($, 'Could not open the dashboard', 'error') }
       },
     }))
     return Box({ flexDirection: 'column', children: rows })
@@ -656,6 +660,16 @@ async function hasSidebar($) {
 // How long each toast stays: a problem longer than news.
 const TOAST_MS = { error: 20000, warn: 12000, info: 8000 }
 
+// A toast is one colour, the engine's: Claude Code takes only its text and
+// strips any colour codes from it. So every toast of Burst's starts with a
+// coloured mark instead, red for an error, yellow for a warning and blue
+// for news, the first two the marks the usage panel's limit toasts use.
+// News went unmarked until 16 Oct 2026 and read as Claude Code's own.
+const TOAST_MARK = { error: '\u{1F534} ', warn: '\u{1F7E1} ', info: '\u{1F535} ' }
+function toast($, text, level = 'info', ms = TOAST_MS[level] || TOAST_MS.info) {
+  $.ui.toast((TOAST_MARK[level] || TOAST_MARK.info) + text, { timeoutMs: ms })
+}
+
 // True when this alert is the mods' to show. The first mod to ask makes the
 // panels' claim and a marker beside it; every other session's mod sees the
 // marker and shows it too, each in its own window. A claim with no marker
@@ -704,7 +718,7 @@ async function compactionLines($) {
     })
     if (!r.ok || !r.text) return
     const lines = String(JSON.parse(r.text).systemMessage || '').split('\n')
-    for (const line of lines) if (line.trim() !== '') $.ui.toast(line.replace(/^\u26a1\s*/, ''), { timeoutMs: TOAST_MS.info })
+    for (const line of lines) if (line.trim() !== '') toast($, line.replace(/^\u26a1\s*/, ''))
   } catch (err) {
     // The gateway keeps what it could not hand over; the hook still shows it.
   }
@@ -716,16 +730,16 @@ async function refresh($) {
     if (!r.ok) throw new Error('status ' + r.status)
     burst = JSON.parse(r.text)
     if (burst.session) heldSeen = burst.session.raw || 0
-    if (down) $.ui.toast('Burst gateway back')
+    if (down) toast($, 'Burst gateway back')
     down = false
     for (const a of burst.alerts || []) {
       since = Math.max(since, a.ts)
-      if (burst.toasts && (await claim($, a.id))) $.ui.toast('Burst: ' + a.title, { timeoutMs: TOAST_MS[a.severity] || TOAST_MS.info })
+      if (burst.toasts && (await claim($, a.id))) toast($, 'Burst: ' + a.title, a.severity)
     }
     await markToasts($, !!burst.toasts)
     if (burst.toasts) await compactionLines($)
   } catch (err) {
-    if (!down) $.ui.toast('Burst dashboard not answering')
+    if (!down) toast($, 'Burst dashboard not answering', 'error')
     down = true
     burst = null
   }
