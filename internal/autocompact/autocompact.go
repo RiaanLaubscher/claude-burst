@@ -62,8 +62,9 @@
 // below the floor, never above the fixed Compact at, a tenth a day at most
 // once a threshold is in use (the first one learned goes straight there),
 // nothing learned from fewer than MinCompactions, and back to the fixed
-// Compact at where most compactions fail or sessions end before one has
-// paid for itself. How often a session may compact at all stays the
+// Compact at where most compactions fail or, for a size from the formula,
+// sessions end before one has paid for itself (a replay has already charged
+// each size for that). How often a session may compact at all stays the
 // compaction settings' delay.
 package autocompact
 
@@ -112,7 +113,29 @@ const (
 	// minMeasuredRequests is how many requests a repository needs in the
 	// window before a size is taken from their replay.
 	minMeasuredRequests = 300
+	// maxReplayError caps how far the replay's measured error widens the
+	// band within which a repository keeps the size it has (replayError).
+	maxReplayError = 0.20
 )
+
+// replayError is how far the replay has been from the bill for this
+// repository: what its requests cost against what the replay predicted for
+// the sizes in force at the time (metrics.StrategyTrack), as a share of the
+// prediction, either way. 0 when there is too little on record to say.
+//
+// The loop that checks the replay: sizes whose replayed costs are closer
+// than this are the same size as far as the replay can tell, so the
+// learner keeps the size a repository has rather than moving on a
+// difference smaller than the replay's own error. From 8 to 16 Oct 2026 the
+// replay ran 10% under the bill over all repositories and 3% to 34% per
+// repository, while the sizes it chose between were often a few per cent
+// apart.
+func replayError(t *metrics.StrategyTrack) float64 {
+	if t == nil || t.Requests < minMeasuredRequests || t.Planned.USD <= 0 {
+		return 0
+	}
+	return math.Abs(t.Actual.USD/t.Planned.USD - 1)
+}
 
 // Outcome kinds the gateway records (router), beside the summary calls
 // that failed, which the metrics log has.
@@ -200,6 +223,13 @@ type Measured struct {
 	LatestUSD   float64 `json:"latest_usd"`
 	ActualUSD   float64 `json:"actual_usd"`
 	FixedUSD    float64 `json:"fixed_usd"`
+	// PlannedUSD and BilledUSD are the replay checked against the bill:
+	// what it predicted the sizes in force would cost since they were on
+	// record, and what those requests did cost. Error is how far apart, a
+	// share of PlannedUSD (replayError). Zero with too little on record.
+	PlannedUSD float64 `json:"planned_usd,omitempty"`
+	BilledUSD  float64 `json:"billed_usd,omitempty"`
+	Error      float64 `json:"error,omitempty"`
 }
 
 // measuredSizes is the cheapest replayed size inside the bounds and the
@@ -229,6 +259,16 @@ func measuredSizes(m metrics.StrategyRepo, b Bounds) (cheapest, latest metrics.S
 		}
 	}
 	return cheapest, latest, true
+}
+
+// sizeOf is the replayed size at, if the sweep has it.
+func sizeOf(sizes []metrics.StrategySize, at int64) (metrics.StrategySize, bool) {
+	for _, z := range sizes {
+		if z.At == at {
+			return z, true
+		}
+	}
+	return metrics.StrategySize{}, false
 }
 
 // State is the learner's file.
@@ -423,8 +463,14 @@ func Learn(st State, in Inputs, b Bounds, step bool) State {
 		// is what a Compact at is worked out from.
 		if !r.Cold {
 			a.costs = append(a.costs, r.CostUSD)
+			// In tokens at the run's own model's price, so runs on
+			// different models pool: the latest run's price turns it back
+			// into money below. Pooled in USD, a Haiku run last priced an
+			// Opus repository's compactions at four times the tokens, the
+			// payback guard below fired, and claude-burst went from 175k
+			// to 500k on four days to 16 Oct 2026.
 			if p > 0 {
-				a.c0 = append(a.c0, math.Max(0, r.CostUSD-p*float64(r.Before)))
+				a.c0 = append(a.c0, math.Max(0, r.CostUSD/p-float64(r.Before)))
 			}
 		}
 		if in.Now.Sub(r.Last) >= settled {
@@ -497,7 +543,8 @@ func Learn(st State, in Inputs, b Bounds, step bool) State {
 		r.TurnsAfter = int(median(a.turnsAfter))
 		r.PaybackTurn, r.SavedTurnUSD, r.Measured = 0, 0, nil
 
-		extraUSD := median(a.c0)
+		extraTokens := median(a.c0)
+		extraUSD := extraTokens * a.price
 		// Room to work in: half as much again as a compaction leaves.
 		low := max(b.Floor, r.AfterTokens*3/2)
 		// best is the size before the bounds are applied to it.
@@ -512,6 +559,15 @@ func Learn(st State, in Inputs, b Bounds, step bool) State {
 			if latest.At > cheapest.At {
 				r.Reason += fmt.Sprintf(", as late as costs no more than %d%% more: %dk ($%.2f)", int(slackShare*100), latest.At/1000, latest.USD)
 			}
+			if e := replayError(m.Track); e > 0 {
+				r.Measured.PlannedUSD, r.Measured.BilledUSD, r.Measured.Error = m.Track.Planned.USD, m.Track.Actual.USD, e
+				r.Reason += fmt.Sprintf("; the replay predicted $%.2f for the sizes in force and the bill was $%.2f (%.0f%% apart)", m.Track.Planned.USD, m.Track.Actual.USD, e*100)
+				band := math.Min(e, maxReplayError)
+				if cur, ok := sizeOf(m.Sizes, r.Threshold); ok && band > slackShare && r.Threshold != best && r.Threshold >= b.Floor && r.Threshold <= b.Ceiling && cur.USD <= cheapest.USD*(1+band) {
+					best = r.Threshold
+					r.Reason += fmt.Sprintf(", so %dk stays: its $%.2f is within that of the cheapest", cur.At/1000, cur.USD)
+				}
+			}
 		case n < MinCompactions:
 			r.Target = 0
 			r.Reason = fmt.Sprintf("%d of the %d compactions needed in the last %d days: on the starting size, the middle of the range, until then", n, MinCompactions, int(Window.Hours()/24))
@@ -521,7 +577,7 @@ func Learn(st State, in Inputs, b Bounds, step bool) State {
 			r.Reason = "no run long enough to measure how fast the context grows: on the starting size, the middle of the range"
 			continue
 		default:
-			best = Optimal(r.AfterTokens, r.GrowthTurn, int64(extraUSD/a.price), a.fails.Rate)
+			best = Optimal(r.AfterTokens, r.GrowthTurn, int64(extraTokens), a.fails.Rate)
 			cheapest := best
 			best = Latest(best, r.AfterTokens, r.GrowthTurn, a.price, extraUSD)
 			late := best
@@ -547,7 +603,9 @@ func Learn(st State, in Inputs, b Bounds, step bool) State {
 		case a.fails.Attempts >= backOffAttempts && a.fails.Rate > backOffShare:
 			target = b.Ceiling
 			r.Reason = fmt.Sprintf("%d of %d compactions lost money: back to the fixed Compact at", a.fails.Count(), a.fails.Attempts)
-		case len(a.turnsAfter) >= MinCompactions && r.TurnsAfter < 2*r.PaybackTurn:
+		// Not for a replayed size: the replay already charged each size's
+		// compactions against the turns the sessions really went on for.
+		case !measured && len(a.turnsAfter) >= MinCompactions && r.TurnsAfter < 2*r.PaybackTurn:
 			target = b.Ceiling
 			r.Reason = fmt.Sprintf("sessions go on %d turns after a compaction and one needs %d to pay for itself: back to the fixed Compact at", r.TurnsAfter, r.PaybackTurn)
 		case best < low:

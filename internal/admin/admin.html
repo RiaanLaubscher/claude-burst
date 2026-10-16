@@ -845,7 +845,7 @@
      renderNav() from the same state the panels are drawn from, so a guard
      that has stopped reporting is visible from the bottom of the requests
      table rather than only from the panel you would have to scroll back to. -->
-<aside class="side">
+<aside class="side" role="navigation" aria-label="Dashboard sections">
   <div class="brand">
     <span class="mark">&#9889;</span>
     <span><span class="name">Claude Burst</span><span class="ver" id="ver"></span></span>
@@ -899,6 +899,7 @@
   <div class="navgroup">Sessions</div>
   <a class="navlink" href="#" data-target="handoverSection"><span class="nd" id="nd-handover"></span><span class="label">Session handover</span></a>
   <a class="navlink" href="#" data-target="sec-coord"><span class="nd" id="nd-coord"></span><span class="label">Session coordination</span></a>
+  <a class="navlink" href="#" data-target="sec-loose"><span class="nd" id="nd-loose"></span><span class="label">Loose ends</span></a>
   <a class="navlink" href="#" data-target="sec-sessions"><span class="nd" id="nd-sessions"></span><span class="label">Session options</span></a>
   <a class="navlink" href="#" data-target="sec-panel"><span class="nd" id="nd-panel"></span><span class="label">Usage panel</span></a>
   <a class="navlink" href="#" data-target="sec-band"><span class="nd" id="nd-band"></span><span class="label">In-session band</span></a>
@@ -1471,7 +1472,7 @@
         <thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th>30 days</th><th></th></tr></thead>
         <tbody id="prBody"></tbody>
       </table></div>
-      <div class="row" style="margin-top:8px"><input id="prNew" placeholder="add a model id" style="min-width:240px"><button id="prAdd">+ Add</button><button class="primary" id="prSave">&#x2713; Save prices</button><button id="prUnused" hidden></button></div>
+      <div class="row" style="margin-top:8px"><input id="prNew" placeholder="add a model id" aria-label="Model id to add a price for" style="min-width:240px"><button id="prAdd">+ Add</button><button class="primary" id="prSave">&#x2713; Save prices</button><button id="prUnused" hidden></button></div>
       <div class="hint">Leave a cache price empty to derive it: for Claude models reads are 0.1x and writes 1.25x the input price; for others, the input price.</div>
       <div id="prNote"></div>
     </div>
@@ -1592,6 +1593,15 @@
       <h3 style="margin:18px 0 6px;font-size:13px">Recent activity</h3>
       <div class="hint" style="margin-bottom:6px">What session coordination has done, newest first: files shared between sessions, actions it blocked, files passed from one session to another, and files released after a commit.</div>
       <div id="coActivity"></div>
+    </div>
+  </section>
+
+  <section id="sec-loose" style="scroll-margin-top:70px">
+    <h2>Loose ends <span class="hint">work left uncommitted, unpushed or stashed in the repositories your sessions use</span></h2>
+    <div class="body">
+      <div class="hint" style="margin:0 0 10px">Every repository a Claude Code session has worked in over the last <span id="leDays">30</span> days, with anything lying in it: files nobody committed, commits nobody pushed, and stashes. With session coordination on, a file a session left uncommitted when it closed names that session; a file a running session is still working on says so, and is its work in progress rather than a loose end. Three things happen without you: a session that closes leaving files uncommitted puts up a red alert, the next session to start in that repository is told what is lying there and asks you what to do with it, and from 09:00 a reminder goes up once a day if anything is more than <span id="leStale">24</span> hours old. Nothing here commits, pushes, stashes or deletes anything: whether half-finished work is worth keeping is your call. Unpushed is against the remote branch as this Mac last fetched it.</div>
+      <div class="row" style="align-items:center;margin-bottom:8px"><button id="leRefresh">&#x21bb; Refresh</button><span class="hint" id="leSummary"></span></div>
+      <div id="leRepos"></div>
     </div>
   </section>
 
@@ -6206,27 +6216,42 @@ async function loadUpgrade(refresh) {
   if (next.error && upgradeState && !upgradeState.error) next = {...upgradeState, check_error: next.error};
   else if (next.error && upgradeState && upgradeState.check_error) next = {...upgradeState, check_error: next.error};
   upgradeState = next;
-  const el = $("upgradeTop"), newer = !!(upgradeState && !upgradeState.error && !upgradeState.up_to_date);
+  const el = $("upgradeTop"), newer = !!(upgradeState && ((!upgradeState.error && !upgradeState.up_to_date) || upgradeState.panel?.behind));
   el.textContent = newer ? "\u27F3 Check version \u00b7 update available" : "\u27F3 Check version";
   el.classList.toggle("success", newer);
   return true;
 }
 // versionMessage is what the dialog says for a status: its tone, mark,
 // title, subtitle and an optional note. Pure, for page_script_test.go.
+// The usage panel is part of it: Upgrade brings whichever of the two is
+// behind up to date, or both.
 function versionMessage(u) {
-  if (u.error) return {tone: "bad", mark: "!", title: "Could not check the version",
-    sub: "GitHub did not answer", note: {cls: "bad", text: "The check failed: " + u.error}, canUpgrade: false};
+  const p = u.panel || {}, panelNew = !!p.behind, panelV = p.latest ? `usage panel ${p.latest}` : "the usage panel's newest release";
+  const panelOnly = {tone: "new", mark: "\u2191", canUpgrade: true,
+    note: {cls: "", text: "Upgrade opens a Terminal window that installs " + panelV + ". Claude Burst is not restarted; run /reload-plugins --force in open Claude Code sessions afterwards."}};
+  if (u.error) {
+    if (panelNew) return {...panelOnly, tone: "warn", mark: "!", title: `Usage panel update available${p.latest ? ": " + p.latest : ""}`,
+      sub: "Claude Burst's own version could not be checked", note: {cls: "warn", text: `Claude Burst's check failed (${u.error}). Upgrade updates the usage panel only.`}};
+    return {tone: "bad", mark: "!", title: "Could not check the version",
+      sub: "GitHub did not answer", note: {cls: "bad", text: "The check failed: " + u.error}, canUpgrade: false};
+  }
+  if (u.up_to_date && panelNew) return {...panelOnly, title: `Usage panel update available${p.latest ? ": " + p.latest : ""}`,
+    sub: `Claude Burst is current; the usage panel here is ${p.version || "of unknown version"}.`};
   if (u.up_to_date && u.ahead > 0) return {tone: "ok", mark: "\u2713", title: "Up to date",
     sub: `Ahead of GitHub by ${u.ahead} commit${u.ahead === 1 ? "" : "s"} not pushed yet. Nothing newer to install.`, canUpgrade: false};
   if (u.up_to_date) return {tone: "ok", mark: "\u2713", title: "Up to date",
     sub: "You are running the latest version on GitHub.", canUpgrade: false};
-  const n = u.behind;
+  const n = u.behind, also = panelNew ? `, and ${panelV}` : "";
+  if (!u.can_upgrade && panelNew) return {...panelOnly, tone: "warn", mark: "!",
+    title: `Upgrade available: ${u.latest_version || u.latest_commit}${also}`, sub: `${n} new commit${n === 1 ? "" : "s"} on GitHub`,
+    note: {cls: "warn", text: `Claude Burst cannot upgrade from here: ${u.reason}. Upgrade updates the usage panel only.`}};
   return {
     tone: u.can_upgrade ? "new" : "warn", mark: u.can_upgrade ? "\u2191" : "!",
-    title: `Upgrade available: ${u.latest_version || u.latest_commit}`,
+    title: `Upgrade available: ${u.latest_version || u.latest_commit}${also}`,
     sub: `${n} new commit${n === 1 ? "" : "s"} on GitHub`,
     note: u.can_upgrade
-      ? {cls: "", text: "Upgrade opens a Terminal window that updates the checkout and redeploys: tests, build, restart (replies in flight finish first), and a rollback by itself if the new gateway is not healthy."}
+      ? {cls: "", text: "Upgrade opens a Terminal window that updates the checkout and redeploys: tests, build, restart (replies in flight finish first), and a rollback by itself if the new gateway is not healthy." +
+          (p.installed ? " The usage panel is brought up to date too." : "")}
       : {cls: "warn", text: `It cannot upgrade from here: ${u.reason}.`},
     canUpgrade: !!u.can_upgrade,
   };
@@ -6251,6 +6276,8 @@ function setVerTone(tone, mark, title, sub) {
 }
 function showVersion() {
   const u = upgradeState || {error: "no answer"}, m = versionMessage(u);
+  // With Burst current, Upgrade is the usage panel's alone.
+  $("verUpgrade").textContent = !u.error && !u.up_to_date && u.can_upgrade ? "\u2913 Upgrade now" : "\u2913 Update usage panel";
   setVerTone(m.tone, m.mark, m.title, m.sub);
   let html = "";
   if (!u.error) {
@@ -6265,6 +6292,9 @@ function showVersion() {
         (u.behind > commits.length ? `<li class="hint">and ${u.behind - commits.length} more</li>` : "") + `</ol>`;
     }
   }
+  const p = u.panel;
+  if (p && p.installed) html += `<div class="ver-note${p.behind ? "" : " hint"}">Usage panel: ${esc(p.version || "version unknown")} here` +
+    (p.latest ? `, ${esc(p.latest)} released${p.behind ? "" : " (current)"}` : "") + (p.note ? `. ${esc(p.note)}` : "") + `</div>`;
   if (m.note) html += `<div class="ver-note ${m.note.cls}">${esc(m.note.text)}</div>`;
   if (u.check_error) html += `<div class="ver-note warn">Could not check again just now (${esc(u.check_error)}). This is the last answer.</div>`;
   $("verBody").innerHTML = html;
@@ -6620,6 +6650,54 @@ $("coSave").onclick = async () => {
   loadCoord();
 };
 loadCoord = serial("Session coordination", loadCoord);
+
+// ---- Loose ends ---------------------------------------------------------------
+function leAgo(at, t) { return t > 0 ? coAgo(Math.max(0, Math.round(at - t))) : "?"; }
+function leHome(p) { return esc((p || "").replace(/^\/Users\/[^/]+/, "~")); }
+const leStatus = {"??": "new, untracked", " M": "changed", "M ": "changed, staged", "MM": "changed, partly staged", "A ": "added", "AM": "added", " D": "deleted", "D ": "deleted, staged", "R ": "renamed", "RM": "renamed, changed", "UU": "merge conflict"};
+function leFile(f, at, root, staleS) {
+  const rel = leHome(f.path.startsWith(root + "/") ? f.path.slice(root.length + 1) : f.path);
+  const o = f.owner;
+  let who;
+  if (o && o.live) who = `<span class="hint">being worked on by ${esc(o.label)}</span>`;
+  else if (o) who = `<span style="color:var(--bad)">left by ${esc(o.label)} when it closed, ${leAgo(at, o.since)} ago</span>`;
+  else who = `<span class="hint">no session recorded, changed ${leAgo(at, f.mtime)} ago</span>`;
+  const old = !(o && o.live) && at - (o ? o.since : f.mtime) > staleS;
+  return `<div style="font-size:12px;padding:1px 0"><span class="mono"${old ? ' style="color:var(--warn)"' : ""}>${rel}</span> <span class="hint">${esc(leStatus[f.status] || f.status.trim())}</span> ${who}</div>`;
+}
+async function loadLoose() {
+  let d;
+  try { d = await getJSON("/api/loose-ends"); } catch { return; }
+  const rp = d.report || {}, repos = rp.repos || [], at = rp.at || Date.now() / 1000, staleS = (d.stale_hours || 24) * 3600;
+  $("leDays").textContent = d.within_days || 30;
+  $("leStale").textContent = d.stale_hours || 24;
+  let files = 0, commits = 0, stashes = 0, left = 0;
+  for (const r of repos) {
+    files += (r.uncommitted || []).filter(f => !(f.owner && f.owner.live)).length;
+    left += (r.uncommitted || []).filter(f => f.owner && !f.owner.live).length;
+    commits += r.ahead || 0; stashes += (r.stashes || []).length;
+  }
+  const st = d.stale || {}, stale = (st.files || 0) + (st.commits || 0) + (st.stashes || 0);
+  setDot("nd-loose", left ? "bad" : stale ? "warn" : "ok");
+  const parts = [];
+  if (files) parts.push(`${files} uncommitted file${files === 1 ? "" : "s"}${left ? `, ${left} left by a closed session` : ""}`);
+  if (commits) parts.push(`${commits} unpushed commit${commits === 1 ? "" : "s"}`);
+  if (stashes) parts.push(`${stashes} stash${stashes === 1 ? "" : "es"}`);
+  $("leSummary").textContent = `${rp.scanned || 0} repositories scanned: ` + (parts.length ? parts.join(", ") + (stale ? `; ${stale} older than ${d.stale_hours} h` : "") : "nothing loose");
+  $("leRepos").innerHTML = repos.length ? `<table><thead><tr><th>Repository</th><th>Uncommitted</th><th>Unpushed</th><th class="num">Stashes</th></tr></thead><tbody>${
+    repos.map(r => {
+      const unc = (r.uncommitted || []);
+      const shown = unc.slice(0, 12).map(f => leFile(f, at, r.root, staleS)).join("") + (unc.length > 12 ? `<div class="hint">and ${unc.length - 12} more</div>` : "");
+      const up = r.ahead ? `<b>${r.ahead}</b> <span class="hint">to ${esc(r.upstream || "any remote")}</span>${(r.unpushed || []).slice(0, 5).map(c => `<div style="font-size:12px"><span class="mono hint">${esc(c.hash)}</span> ${esc(c.subject.length > 90 ? c.subject.slice(0, 90) + "..." : c.subject)} <span class="hint">${leAgo(at, c.when)} ago</span></div>`).join("")}` : '<span class="hint">-</span>';
+      const sx = (r.stashes || []).length ? (r.stashes || []).map(x => `<div style="font-size:12px" title="${esc(x.subject)}"><span class="mono">${esc(x.ref)}</span> <span class="hint">${leAgo(at, x.when)} ago</span></div>`).join("") : '<span class="hint">-</span>';
+      return `<tr><td><b>${esc(r.root.split("/").pop())}</b><div class="hint mono" style="font-size:11px">${leHome(r.root)}</div><div class="hint" style="font-size:11px">${esc(r.branch || "detached")}${r.no_remote ? ", no remote" : ""}</div>${r.error ? `<div style="color:var(--bad)">${esc(r.error)}</div>` : ""}</td><td>${shown || '<span class="hint">-</span>'}</td><td>${up}</td><td class="num">${sx}</td></tr>`;
+    }).join("")
+  }</tbody></table>` : `<div class="empty">Nothing loose: every repository is committed and pushed.</div>`;
+}
+loadLoose = serial("Loose ends", loadLoose);
+$("leRefresh").onclick = () => loadLoose();
+loadLoose();
+setInterval(() => { if (!document.hidden) loadLoose(); }, 60000);
 loadCoord();
 setInterval(() => { if (!document.hidden) loadCoord(); }, 10000);
 
@@ -6686,6 +6764,7 @@ function renderSettings() {
     const rows = prShowUnused ? all : all.filter(p => !(p.price && !p.requests));
     $("prUnused").hidden = !unused.length;
     $("prUnused").textContent = prShowUnused ? `Hide ${unused.length} unused` : `Show ${unused.length} priced but unused`;
+    const prLabel = {input_per_mtok: "input price", output_per_mtok: "output price", cache_read_per_mtok: "cache read price", cache_write_per_mtok: "cache write price"};
     $("prBody").innerHTML = rows.map(p => {
       const pr = p.price || {};
       // An empty cache price is derived from the input price (Claude: reads
@@ -6693,7 +6772,7 @@ function renderSettings() {
       const claude = p.model.includes("claude"), inp = pr.input_per_mtok || 0;
       const auto = {cache_read_per_mtok: claude ? inp * 0.1 : inp, cache_write_per_mtok: claude ? inp * 1.25 : inp};
       const ph = k => !p.price ? "?" : (k in auto) ? `auto ${+auto[k].toFixed(3)}` : "";
-      const cell = k => `<td><input type="number" min="0" step="0.01" data-pm="${esc(p.model)}" data-pk="${k}" value="${pr[k] || (k in auto ? "" : pr[k] ?? "")}" placeholder="${ph(k)}"></td>`;
+      const cell = k => `<td><input type="number" min="0" step="0.01" data-pm="${esc(p.model)}" data-pk="${k}" value="${pr[k] || (k in auto ? "" : pr[k] ?? "")}" placeholder="${ph(k)}" aria-label="${esc(p.model)} ${prLabel[k]}, US dollars per million tokens"></td>`;
       const use = p.requests ? `${p.requests.toLocaleString()} req${p.price ? `, $${p.usd.toFixed(2)}` : ""}` : "not used";
       return `<tr class="${!p.price && p.unpriced ? "unpriced" : ""}"><td><code>${esc(p.model)}</code>${!p.price && p.unpriced ? " (no price)" : ""}</td>${cell("input_per_mtok")}${cell("output_per_mtok")}${cell("cache_read_per_mtok")}${cell("cache_write_per_mtok")}<td class="hint">${use}</td><td>${prAction(p)}</td></tr>`;
     }).join("");

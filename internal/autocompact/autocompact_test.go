@@ -430,3 +430,94 @@ func TestAReplayedSizeStaysInsideTheBoundsAndTheGuards(t *testing.T) {
 		t.Fatalf("target %d (%s), want the ceiling", r.Target, r.Reason)
 	}
 }
+
+// A compaction's cost beyond reading the history is pooled in tokens, so
+// a repository whose latest run was on a cheaper model is not priced as if
+// every compaction had been: on 16 Oct 2026 a Haiku run last quadrupled
+// claude-burst's payback and sent it from 175k to 500k.
+func TestTheLatestRunsModelDoesNotRepriceTheOthers(t *testing.T) {
+	cheap := func(string) float64 { return readPrice }
+	priced := func(last string) Inputs {
+		var runs []metrics.CompactionRun
+		for i := 0; i < 4; i++ {
+			runs = append(runs, swapped(fmt.Sprintf("a%d", i), 300_000, 70_000, 0.40, 40, 2_000))
+		}
+		h := swapped("a9", 300_000, 70_000, 0.10, 40, 2_000)
+		h.Model, h.Last = last, h.Last.Add(time.Minute)
+		in := inputs(append(runs, h)...)
+		in.ReadPrice = func(m string) float64 {
+			if m == "haiku" {
+				return readPrice / 4
+			}
+			return cheap(m)
+		}
+		return in
+	}
+	same := Learn(empty(), priced("m"), bounds, true).Repos["/src/repo-a"]
+	haiku := Learn(empty(), priced("haiku"), bounds, true).Repos["/src/repo-a"]
+	if haiku.PaybackTurn != same.PaybackTurn || haiku.Target != same.Target {
+		t.Fatalf("latest on a cheaper model: payback %d target %d, want %d and %d as with the same model", haiku.PaybackTurn, haiku.Target, same.PaybackTurn, same.Target)
+	}
+}
+
+// A replayed size is not sent back to the fixed Compact at because
+// sessions end soon after a compaction: the replay charged every size for
+// the turns its sessions really ran.
+func TestAReplayedSizeIsNotOverruledByThePaybackGuard(t *testing.T) {
+	b := Bounds{Floor: 100_000, Ceiling: 500_000, Start: 300_000}
+	short := swapped("a1", 150_000, 70_000, 0.40, 10, 2_000)
+	grow := metrics.CompactionRun{Session: "a9", Model: "m", At: now.Add(-72 * time.Hour), Last: now.Add(-71 * time.Hour), Start: 20_000, End: 220_000, Turns: 100}
+	in := inputs(short, short, short, grow)
+	if r := Learn(empty(), in, b, true).Repos["/src/repo-a"]; r.Target != b.Ceiling {
+		t.Fatalf("formula: target %d, want the guard to send it to the ceiling", r.Target)
+	}
+	in.Measured = map[string]metrics.StrategyRepo{"/src/repo-a": replay(1000, 140, map[int64]float64{150: 100, 175: 103, 500: 160})}
+	if r := Learn(empty(), in, b, true).Repos["/src/repo-a"]; r.Target != 175_000 || strings.Contains(r.Reason, "back to the fixed") {
+		t.Fatalf("replayed: target %d (%s), want the replay's 175k", r.Target, r.Reason)
+	}
+}
+
+// The replay is checked against the bill, and a size whose replayed cost
+// is closer to the cheapest than the replay's measured error stays: the
+// replay cannot tell them apart. With the replay close to the bill, the
+// same difference moves the size as before.
+func TestASizeStaysWhileTheReplayCannotTellItFromTheCheapest(t *testing.T) {
+	b := Bounds{Floor: 100_000, Ceiling: 500_000, Start: 300_000}
+	in := inputs(metrics.CompactionRun{Session: "a1", Model: "m", At: now.Add(-48 * time.Hour), Last: now.Add(-47 * time.Hour), Start: 50_000, End: 90_000, Turns: 20})
+	// The repository is on 250k, 8% above the cheapest at 150k.
+	prior := State{Repos: map[string]*Repo{"/src/repo-a": {Root: "/src/repo-a", Threshold: 250_000}}}
+	measured := func(planned, billed float64) map[string]metrics.StrategyRepo {
+		m := replay(1000, 140, map[int64]float64{150: 100, 175: 103, 250: 108})
+		m.Track = &metrics.StrategyTrack{Planned: metrics.StrategyCost{USD: planned}}
+		m.Track.Requests, m.Track.Actual.USD = 1000, billed
+		return map[string]metrics.StrategyRepo{"/src/repo-a": m}
+	}
+	// The bill 12% over the replay: 8% is inside its error, 250k stays.
+	in.Measured = measured(100, 112)
+	r := Learn(prior, in, b, true).Repos["/src/repo-a"]
+	if r.Threshold != 250_000 || r.Measured.Error < 0.119 || r.Measured.Error > 0.121 || r.Measured.PlannedUSD != 100 || r.Measured.BilledUSD != 112 {
+		t.Fatalf("threshold %d measured %+v, want 250k kept on a 12%% error", r.Threshold, r.Measured)
+	}
+	if !strings.Contains(r.Reason, "predicted $100.00 for the sizes in force and the bill was $112.00 (12% apart), so 250k stays") {
+		t.Fatalf("reason %q", r.Reason)
+	}
+	// The bill 2% over: the replay is trusted, and the size moves to the
+	// latest within the slack of the cheapest.
+	in.Measured = measured(100, 102)
+	if r = Learn(prior, in, b, true).Repos["/src/repo-a"]; r.Threshold != 175_000 {
+		t.Fatalf("threshold %d, want 175k on a 2%% error", r.Threshold)
+	}
+	// Too little on record to check: as before, it moves.
+	in.Measured = measured(100, 112)
+	in.Measured["/src/repo-a"].Track.Requests = minMeasuredRequests - 1
+	if r = Learn(prior, in, b, true).Repos["/src/repo-a"]; r.Threshold != 175_000 || r.Measured.Error != 0 {
+		t.Fatalf("threshold %d error %v, want 175k with nothing checked", r.Threshold, r.Measured.Error)
+	}
+	// An error past the cap does not hold a size far from the cheapest.
+	m := measured(100, 160)
+	m["/src/repo-a"].Sizes[6].USD = 125 // 250k, 25% above the cheapest
+	in.Measured = m
+	if r = Learn(prior, in, b, true).Repos["/src/repo-a"]; r.Threshold != 175_000 {
+		t.Fatalf("threshold %d, want 175k: a 60%% error is capped at %v", r.Threshold, maxReplayError)
+	}
+}
