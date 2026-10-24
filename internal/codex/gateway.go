@@ -29,6 +29,7 @@ import (
 	"github.com/andrewbakercloudscale/claude-burst/internal/ctxview"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -39,6 +40,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/andrewbakercloudscale/claude-burst/internal/metrics"
@@ -152,7 +154,13 @@ func New(upstream, metricsPath string, logger *log.Logger) (*Gateway, error) {
 	if b, err := os.ReadFile(g.statePath); err == nil {
 		var sv saved
 		if json.Unmarshal(b, &sv) == nil {
-			g.limits, g.windows, g.failures = sv.Limits, sv.Windows, sv.Failures
+			g.limits, g.windows = sv.Limits, sv.Windows
+			for _, e := range sv.Failures {
+				// Kept before 23 Oct 2026, when an outage was a failure.
+				if !strings.Contains(e.Note, "lookup chatgpt.com") || !strings.Contains(e.Note, "no such host") {
+					g.failures = append(g.failures, e)
+				}
+			}
 		}
 	}
 	g.proxy = &httputil.ReverseProxy{
@@ -186,8 +194,16 @@ func New(upstream, metricsPath string, logger *log.Logger) (*Gateway, error) {
 				return
 			}
 			logger.Printf("codex: %s %q failed: %q", r.Method, r.URL.Path, err.Error())
-			g.noteFailure(r, http.StatusBadGateway, "upstream unreachable: "+err.Error())
-			g.record(r, http.StatusBadGateway, usage{}, "upstream unreachable: "+err.Error())
+			if offline(err) {
+				// This Mac is offline, which the network notice already says.
+				// A turn is recorded as sent while offline, not as failing; a
+				// model list Codex polls every few minutes is left out of the
+				// failures, which it filled five at a time on every outage.
+				g.record(r, http.StatusBadGateway, usage{}, offlineNote+err.Error())
+			} else {
+				g.noteFailure(r, http.StatusBadGateway, "upstream unreachable: "+err.Error())
+				g.record(r, http.StatusBadGateway, usage{}, "upstream unreachable: "+err.Error())
+			}
 			http.Error(w, "Claude Burst could not reach "+u.Host+": "+err.Error(), http.StatusBadGateway)
 		},
 	}
@@ -729,4 +745,43 @@ func peekBody(resp *http.Response, n int64) []byte {
 		io.Closer
 	}{io.MultiReader(bytes.NewReader(b), resp.Body), resp.Body}
 	return b
+}
+
+// offlineNote opens the note of a turn sent while this Mac was offline; it
+// is what metrics.IsOffline reads, as for Claude Code's.
+const offlineNote = "local network unavailable (this Mac is offline): "
+
+// offline reports whether err is this Mac having no network: no route leads
+// anywhere, or chatgpt.com does not resolve and neither does a name nobody
+// Burst routes to. ChatGPT's name failing alone (a network or DNS filter
+// that blocks it) is a failure, and stays one.
+func offline(err error) bool {
+	if errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH) {
+		return true
+	}
+	var dns *net.DNSError
+	return errors.As(err, &dns) && (dns.IsNotFound || dns.IsTemporary) && controlDNSFails()
+}
+
+// controlHost is resolved to tell an offline Mac from a blocked ChatGPT.
+var controlHost = "captive.apple.com"
+
+// The answer is kept briefly: Codex sends its failing requests five at once.
+var (
+	controlMu  sync.Mutex
+	controlAt  time.Time
+	controlBad bool
+)
+
+func controlDNSFails() bool {
+	controlMu.Lock()
+	defer controlMu.Unlock()
+	if time.Since(controlAt) < 10*time.Second {
+		return controlBad
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := net.DefaultResolver.LookupHost(ctx, controlHost)
+	controlAt, controlBad = time.Now(), err != nil
+	return controlBad
 }
