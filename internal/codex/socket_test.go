@@ -232,9 +232,21 @@ func TestATurnOverAWebSocketIsMaskedAndCounted(t *testing.T) {
 		back = append(back, buf[:n]...)
 	}
 
-	// A second turn on the same socket, refused; then a third left without
+	// An error with no turn waiting (ChatGPT ending the socket at its 60
+	// minutes) is no turn, so the next one recorded is the 503. Then a
+	// second turn on the same socket, refused; then a third left without
 	// an answer when Codex hangs up.
+	up.say(`{"type":"error","error":{"type":"invalid_request_error","code":"websocket_connection_limit_reached"},"status":400}`)
+	// Through the gateway before the next turn is sent.
+	for !bytes.Contains(back, []byte("websocket_connection_limit_reached")) {
+		n, err := conn.Read(buf)
+		if err != nil {
+			t.Fatalf("Codex got %q, not the expired socket's error: %v", back, err)
+		}
+		back = append(back, buf[:n]...)
+	}
 	conn.Write(clientFrame(0x80|opText, key, []byte(socketTurn)))
+	up.waitGot(t, 2*len(masked))
 	up.say(`{"type":"error","error":{"message":"try again","type":"server_error"},"status":503}`)
 	evs = waitEvents(t, mp, 2)
 	if e := evs[1]; e.HTTPStatus != 503 || !strings.Contains(e.Note, "try again") {
