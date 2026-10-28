@@ -247,6 +247,7 @@ func serve(args []string) {
 		a.SetCodex(codexGW, codexStartErr)
 		go background(logger, "dashboard notifier", time.Minute, func() { a.StartNotifier(context.Background()) })
 		go background(logger, "compaction learner", time.Minute, func() { a.StartLearner(context.Background()) })
+		go background(logger, "graphify warm-up", 0, a.WarmGraphify)
 		if err := admin.SyncPromptNoticeHook(cfg); err != nil {
 			logger.Printf("error stage=prompt_notice_hook err=%v", err)
 		}
