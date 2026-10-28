@@ -68,6 +68,8 @@ type Server struct {
 	extraHost string
 	// repos maps sessions to repositories for spend per repo.
 	repos *repoResolver
+	// graphify scans transcripts for graphify calls, built on first use.
+	graphify graphifyScan
 	// rootHelper is the resolved path to transparent-root.sh, computed once
 	// by the caller (cmd/claude-burst/main.go's rootHelperPath) rather than
 	// re-derived here -- that search-the-likely-locations logic already
@@ -138,6 +140,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/audit", readOnly(handleAudit))
 	mux.HandleFunc("/api/audit/context", readOnly(handleAuditContext))
 	mux.HandleFunc("/audit.js", readOnly(handleAuditJS))
+	mux.HandleFunc("/api/graphify", s.readOnly(s.handleGraphify))
+	mux.HandleFunc("/graphify.js", readOnly(handleGraphifyJS))
 	mux.HandleFunc("/api/reset", s.mutating(s.handleReset))
 	mux.HandleFunc("/api/force", s.mutating(s.handleForce))
 	mux.HandleFunc("/api/downgrade", s.mutating(s.handleDowngrade))

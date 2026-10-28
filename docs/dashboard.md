@@ -20,7 +20,7 @@ Three tabs at the top of the menu split the page: **Claude** (Claude Code: every
 
 The menu down the left follows you as you scroll, grouped by job:
 
-- **Observe**: Overview, Activity, Analytics (latency and error rate: of requests that failed, not the ones refused while this Mac was offline or that Claude Code cancelled, which the check counts beside it), Spend by model, **Spend by repository** (each session filed under the repository its Claude Code transcript says it ran in), and [Usage](#usage).
+- **Observe**: Overview, Activity, Analytics (latency and error rate: of requests that failed, not the ones refused while this Mac was offline or that Claude Code cancelled, which the check counts beside it), Spend by model, **Spend by repository** (each session filed under the repository its Claude Code transcript says it ran in), [Usage](#usage) and [Graphify](#graphify).
 - **Context**: [Pauseless Compaction](compaction.md), Context & cache.
 - **Routing**: failover strategy and intercept mode, Secondary, [Failover & pricing](#failover--pricing).
 - **Sessions**: [Session handover](handover.md), [Session coordination](coordination.md), [Session options](#session-options-and-the-usage-panel), [Usage panel](#session-options-and-the-usage-panel).
@@ -49,6 +49,7 @@ Screenshots are of the real dashboard with repository names, paths, session task
 | Compaction strategies | Claude, Observe | Claude Code alone, a fixed limit and Burst, side by side | [compaction-strategies](screenshots/compaction-strategies.png) |
 | Spend by model and repository | Claude, Observe | Where the money goes | [spend](screenshots/spend.png) |
 | Usage | Claude, Observe | Any window, filtered down to single requests | [usage](screenshots/usage.png) |
+| Graphify | Claude, Observe | Is Claude asking the graphify knowledge graph, and what do its answers cost? | |
 | Pauseless Compaction | Claude, Context | Switches, limits and results | [pauseless-compaction](screenshots/pauseless-compaction.png), [intelligent-compaction](screenshots/intelligent-compaction.png) |
 | Context & cache | Claude, Context | Is pruning and prompt caching working? | [context-and-cache](screenshots/context-and-cache.png) |
 | Automask | General, Privacy | Which secrets and personal data are masked, and how many | [automask](screenshots/automask.png) |
@@ -331,3 +332,17 @@ hostile page can guess and navigate to weakens it. What still holds: mutating re
 require a custom header, so a cross-origin page needs a preflight this server never answers,
 and no CORS headers are ever returned, so responses cannot be read cross-origin. A hostile
 page could therefore fire read-only requests but not see the answers.
+
+## Graphify
+
+The **Graphify** section (Claude tab, Observe) shows whether Claude Code is using [graphify](https://github.com/safishamsi/graphify) and what its answers cost. It reads Claude Code's transcripts in `~/.claude/projects`, not `metrics.jsonl`, so it works for sessions that never went through the gateway. The first read of a month of transcripts can take about half a minute; later reads only look at what changed.
+
+- **Questions asked**: `graphify query`, `explain` and `path` runs, including those made by subagents and through the `graphify` MCP server. A call that appears in two transcripts (a resumed session) counts once.
+- **Sessions using it**: sessions that asked at least one question, out of sessions that ran in a repository with `graphify-out/graph.json`.
+- **Answer size**: tokens the answers put into context, estimated as characters divided by four.
+- **Files cited**: tokens of the files the answers named, each capped at about one Read. A ceiling on what the answers replaced, not a saving: a careful Grep and a short Read costs far less, and an independent test found graphify level with that approach.
+- **Cut short**: answers graphify truncated at its token budget. A high share means questions are being answered from a partial subgraph.
+- **By repository**: graph age, commits made since it was built, sessions using it, questions and rebuilds.
+- **What Claude did instead**: Read, Grep and Glob calls per session with and without questions. An observation only: sessions that ask questions tend to be longer.
+
+The section also says when the `graphify` command is not on the PATH or the Claude Code hook (`graphify claude install`) is not in `settings.json`.
