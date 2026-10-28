@@ -105,7 +105,20 @@ func commitsSince(root string, since time.Time) int {
 }
 
 func graphifyInstall() graphifySetup {
-	bin, _ := exec.LookPath("graphify")
+	home, _ := os.UserHomeDir()
 	settings, _ := os.ReadFile(filepath.Join(filepath.Dir(claudeProjectsDir()), "settings.json"))
-	return graphifySetup{Binary: bin, HookInstalled: strings.Contains(string(settings), "graphify")}
+	return graphifySetup{Binary: findGraphify(home), HookInstalled: strings.Contains(string(settings), "graphify")}
+}
+
+func findGraphify(home string) string {
+	if p, err := exec.LookPath("graphify"); err == nil {
+		return p
+	}
+	for _, dir := range []string{filepath.Join(home, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin"} {
+		p := filepath.Join(dir, "graphify")
+		if info, err := os.Stat(p); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	return ""
 }

@@ -100,3 +100,22 @@ func TestGraphifyPageWiring(t *testing.T) {
 		}
 	}
 }
+
+func TestFindGraphifyLooksBeyondTheGatewaysPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PATH", t.TempDir())
+	if got := findGraphify(home); got != "" {
+		t.Fatalf("found %q with nothing installed", got)
+	}
+	bin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(bin, "graphify")
+	if err := os.WriteFile(want, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := findGraphify(home); got != want {
+		t.Errorf("findGraphify = %q, want %q", got, want)
+	}
+}
