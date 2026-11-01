@@ -110,18 +110,18 @@ func TestDefaultsAreStoredAsEmptySoTheyKeepFollowingTheDefault(t *testing.T) {
 		t.Errorf("defaults should be stored as zero values, got %+v", c)
 	}
 	e := readEffective(t)
-	if !e.Brief || !e.Write || !e.Commit || e.MinPrompts != 2 || e.Model != "opus" || e.Instructions != DefaultInstructions {
+	if !e.Brief || !e.Write || !e.Commit || e.MinPrompts != 2 || e.Model != "opus" || e.Instructions != DefaultInstructions || e.KeepSections != 0 || e.ArchiveTrimmed {
 		t.Errorf("effective settings %+v", e)
 	}
 }
 
 func TestSaveAppliesToTheScriptsSettings(t *testing.T) {
 	home(t)
-	if err := Save(Config{NoCommit: true, MinPrompts: 5, Model: "sonnet", Instructions: "write {{file}}"}); err != nil {
+	if err := Save(Config{NoCommit: true, MinPrompts: 5, Model: "sonnet", Instructions: "write {{file}}", KeepSections: 20, ArchiveTrimmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	e := readEffective(t)
-	if e.Commit || e.MinPrompts != 5 || e.Model != "sonnet" || e.Instructions != "write {{file}}" || e.Briefing != DefaultBriefing {
+	if e.Commit || e.MinPrompts != 5 || e.Model != "sonnet" || e.Instructions != "write {{file}}" || e.Briefing != DefaultBriefing || e.KeepSections != 20 || !e.ArchiveTrimmed {
 		t.Errorf("effective settings %+v", e)
 	}
 }
@@ -129,6 +129,7 @@ func TestSaveAppliesToTheScriptsSettings(t *testing.T) {
 func TestNormalizeRejectsBadValues(t *testing.T) {
 	for _, c := range []Config{
 		{MinPrompts: -1}, {MinPrompts: 51},
+		{KeepSections: -1}, {KeepSections: MaxKeepSections + 1},
 		{Model: "opus; rm -rf ~"}, {Model: "two words"},
 		{Instructions: strings.Repeat("x", maxTextBytes+1)},
 	} {

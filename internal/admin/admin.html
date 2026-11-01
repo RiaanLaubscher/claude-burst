@@ -1519,6 +1519,10 @@
           <input type="number" id="hoMin" min="1" max="50" step="1" style="width:100px;min-width:0">
         </div>
         <div>
+          <label for="hoKeep">Sections to keep</label>
+          <input type="number" id="hoKeep" min="0" max="500" step="1" style="width:100px;min-width:0">
+        </div>
+        <div>
           <label for="hoModel">Writer model</label>
           <select id="hoModel" style="width:280px">
             <option value="opus">Opus: best handover (1M context)</option>
@@ -1528,6 +1532,11 @@
           </select>
         </div>
       </div>
+      <label style="display:flex;gap:8px;align-items:center;cursor:pointer;font-weight:600;font-size:13px;color:var(--text);margin-top:10px">
+        <input type="checkbox" id="hoArchive" style="width:auto;margin:0">
+        Move trimmed sections to HANDOFF.archive.md instead of deleting them
+      </label>
+      <div class="hint" style="margin:4px 0 8px"><strong>Sections to keep</strong>: after each write, only the newest that many <code># Handover, </code> sections stay in HANDOFF.md, so it stops growing; <code>0</code> keeps them all. Anything above the first section and every block under another top-level heading stay where they are. The archive holds what was removed, newest first, beside HANDOFF.md: kept out of git when HANDOFF.md is gitignored, committed with it when it is committed.</div>
       <div class="hint" style="margin:6px 0 8px">Ending means <code>/exit</code>, Ctrl-D, <code>/clear</code> or closing the Ghostty window or tab. A background job then reopens a copy of the finished session with the writer model, so it has the whole conversation, and gives it the instructions below. It takes about a minute and a macOS notification says when it is done. Sessions with fewer typed prompts than the minimum are skipped. The writer can only read, edit HANDOFF.md and run read-only git commands. <strong>Cost</strong>: the writer re-reads the whole session, so a long session costs as much as one more turn of it; a cheaper model writes a thinner handover, and only costs less when the session ran on that model too, because the re-read comes from cache only on the same model. Opus, Fable and Sonnet read up to 1M tokens; Haiku stops at 200k, so it fails on longer sessions. Placeholders: <code>{{file}}</code>, <code>{{now}}</code> (local time), <code>{{session}}</code>.</div>
       <textarea id="hoInstructions" rows="16" spellcheck="false"></textarea>
 
@@ -3598,6 +3607,11 @@ function setHandoverOpen(open) {
 $("handoverHead").onclick = () =>
   setHandoverOpen($("handoverSection").classList.contains("collapsed"));
 
+function hoSyncDisabled() {
+  $("hoCommit").disabled = !$("hoWrite").checked;
+  $("hoArchive").disabled = !$("hoWrite").checked || !(parseInt($("hoKeep").value, 10) > 0);
+}
+
 function renderHandover(s) {
   const h = s.handover;
   if (!h) return;
@@ -3612,6 +3626,7 @@ function renderHandover(s) {
     parts.push(eff.brief ? "briefing on start" : "briefing OFF");
     parts.push(eff.write ? `writing on close with ${eff.model}` : "writing OFF");
     if (eff.write) parts.push(eff.commit ? "committing locally" : "not committing");
+    if (eff.write && eff.keep_sections) parts.push(`keeping the newest ${eff.keep_sections} section${eff.keep_sections === 1 ? "" : "s"}${eff.archive_trimmed ? " and archiving the rest" : ""}`);
     cls = "ok"; text = "INSTALLED: " + parts.join(", ") + ".";
   } else if (h.legacy) {
     cls = "warn"; text = "OLD HOOKS ACTIVE: the hand-installed ~/.claude/hooks/handover-*.sh pair is running and ignores the settings below. Click Install hooks to switch to these; it removes the old pair.";
@@ -3633,6 +3648,8 @@ function renderHandover(s) {
     $("hoWrite").checked = !!eff.write;
     $("hoCommit").checked = !!eff.commit;
     $("hoMin").value = eff.min_prompts || 2;
+    $("hoKeep").value = eff.keep_sections || 0;
+    $("hoArchive").checked = !!eff.archive_trimmed;
     const m = eff.model || "opus", sel = $("hoModel");
     // A model set by hand in settings.json stays selectable rather than
     // silently turning into the first option.
@@ -3641,7 +3658,7 @@ function renderHandover(s) {
     $("hoBriefing").value = eff.briefing || "";
     $("hoInstructions").value = eff.instructions || "";
   }
-  $("hoCommit").disabled = !$("hoWrite").checked;
+  hoSyncDisabled();
   $("hoLogPath").textContent = (h.dir || "") + "/handover.log";
   hoLogLines = h.log || [];
   renderHoLog();
@@ -3661,7 +3678,7 @@ const HO_STEPS = {
   // "Nothing to hand over" is green, not grey: the hook looked, found the
   // session empty, and did the right thing. "Skipped" is yellow, not grey:
   // the handover did not happen for a reason, and a reason is worth reading.
-  none: ["Nothing to hand over", "p"], skip: ["Skipped", "warn"],
+  none: ["Nothing to hand over", "p"], skip: ["Skipped", "warn"], trim: ["Trimmed", "p"],
 };
 function parseHoLine(line) {
   const m = line.match(/^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (\S+)\s+(.*?)(?: \[([0-9a-f-]{8,})\])?$/);
@@ -3788,8 +3805,8 @@ $("hoDeleteAll").onclick = async () => {
   }
 };
 
-for (const id of ["hoBrief", "hoWrite", "hoCommit", "hoMin", "hoModel", "hoBriefing", "hoInstructions"]) {
-  $(id).addEventListener("input", () => { hoDirty = true; $("hoCommit").disabled = !$("hoWrite").checked; });
+for (const id of ["hoBrief", "hoWrite", "hoCommit", "hoMin", "hoKeep", "hoArchive", "hoModel", "hoBriefing", "hoInstructions"]) {
+  $(id).addEventListener("input", () => { hoDirty = true; hoSyncDisabled(); });
 }
 
 $("hoSave").onclick = async () => {
@@ -3798,6 +3815,8 @@ $("hoSave").onclick = async () => {
     no_write: !$("hoWrite").checked,
     no_commit: !$("hoCommit").checked,
     min_prompts: parseInt($("hoMin").value, 10) || 0,
+    keep_sections: parseInt($("hoKeep").value, 10) || 0,
+    archive_trimmed: $("hoArchive").checked,
     model: $("hoModel").value.trim(),
     briefing: $("hoBriefing").value,
     instructions: $("hoInstructions").value,

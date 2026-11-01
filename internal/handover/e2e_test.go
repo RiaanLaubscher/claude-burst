@@ -7,6 +7,7 @@ package handover
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,9 +28,14 @@ const fakeClaude = `#!/usr/bin/env bash
 prompt=$(cat)
 echo "prompt: ${prompt:0:80}" >> "$FAKE_CLAUDE_LOG"
 if [[ "${FAKE_CLAUDE_MODE:-write}" == write ]]; then
-  root=$(git rev-parse --show-toplevel)
-  { printf '# Handover 2026-09-29\n\nDone: the widget \xe2\x80\x94 shipped.\n\n'; cat "$root/HANDOFF.md"; } > "$root/HANDOFF.md.new"
-  mv "$root/HANDOFF.md.new" "$root/HANDOFF.md"
+  python3 - "$(git rev-parse --show-toplevel)/HANDOFF.md" "${FAKE_CLAUDE_HEADING:-# Handover 2026-09-29}" <<'PY'
+import re, sys
+p, heading = sys.argv[1], sys.argv[2]
+s = open(p).read()
+m = re.search(r"^# ", s, re.M)
+i = m.start() if m else 0
+open(p, "w").write(s[:i] + heading + "\n\nDone: the widget — shipped.\n\n" + s[i:])
+PY
 fi
 echo '{"type":"result","result":"ok"}'
 `
@@ -155,6 +161,29 @@ func (r *rig) waitFor(substr string) string {
 	}
 	r.t.Fatalf("log never showed %q:\n%s", substr, r.log())
 	return ""
+}
+
+func (r *rig) writeNow(extraEnv ...string) string {
+	r.t.Helper()
+	cmd := exec.Command(r.script("write.sh"), "sess-1", r.repo, r.root)
+	cmd.Env = append(append([]string{}, r.env...), extraEnv...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		r.t.Fatalf("write.sh: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+func (r *rig) read(name string) (string, bool) {
+	r.t.Helper()
+	b, err := os.ReadFile(filepath.Join(r.repo, name))
+	if os.IsNotExist(err) {
+		return "", false
+	}
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return string(b), true
 }
 
 func (r *rig) calls_() string {
@@ -330,5 +359,247 @@ func TestAuditListsReadsAndDeletesWhatTheWriterWrote(t *testing.T) {
 	r.end(3)
 	if r.log() != before {
 		t.Fatal("a repository without HANDOFF.md must be left alone")
+	}
+}
+
+func sec(n int) string {
+	return fmt.Sprintf("# Handover, 2026-10-%02d 10:00: topic %d\n<!-- session: s-%d -->\n\n## State right now\n- item %d\n\n", n, n, n, n)
+}
+
+func secs(ns ...int) string {
+	var b strings.Builder
+	for _, n := range ns {
+		b.WriteString(sec(n))
+	}
+	return b.String()
+}
+
+const (
+	newHeading = "# Handover, 2026-11-01 09:00: new\n<!-- session: sess-1 -->"
+	newSection = newHeading + "\n\nDone: the widget, shipped.\n\n"
+	standing   = "# HANDOVER, DigiVacc v1\n\n## Immediate next\n- the standing block\n"
+	fenced     = "# Handover, 2026-10-02 10:00: fenced\n<!-- session: s-2 -->\n\n```bash\n# Handover, 2026-01-01 00:00: an example\n# a shell comment\n```\n\n"
+)
+
+func TestTrimKeepsTheNewestSections(t *testing.T) {
+	tests := map[string]struct {
+		cfg         Config
+		handoff     string
+		archive     string
+		heading     string
+		mode        string
+		wantHandoff string
+		wantArchive string
+		wantLog     string
+	}{
+		"keeps the newest and every block under another heading": {
+			cfg:         Config{KeepSections: 3},
+			handoff:     secs(5, 4) + "# Read me\n\nkeep this\n\n" + secs(3, 2, 1) + standing,
+			wantHandoff: newSection + secs(5, 4) + "# Read me\n\nkeep this\n\n" + standing,
+			wantLog:     "kept 3 sections, removed 3",
+		},
+		"keeps a preamble": {
+			cfg:         Config{KeepSections: 1},
+			handoff:     "Notes for this repo.\n\n" + secs(2, 1),
+			wantHandoff: "Notes for this repo.\n\n" + newSection,
+			wantLog:     "kept 1 section, removed 2",
+		},
+		"zero keeps every section": {
+			handoff:     secs(3, 2, 1),
+			wantHandoff: newSection + secs(3, 2, 1),
+		},
+		"fewer sections than the limit": {
+			cfg:         Config{KeepSections: 5},
+			handoff:     secs(2, 1),
+			wantHandoff: newSection + secs(2, 1),
+		},
+		"archives what it removes, newest first": {
+			cfg:         Config{KeepSections: 2, ArchiveTrimmed: true},
+			handoff:     secs(4, 3, 2),
+			archive:     sec(1),
+			wantHandoff: newSection + sec(4),
+			wantArchive: secs(3, 2, 1),
+			wantLog:     "kept 2 sections, archived 2 to HANDOFF.archive.md",
+		},
+		"a writer that changes nothing trims nothing": {
+			cfg:         Config{KeepSections: 1, ArchiveTrimmed: true},
+			mode:        "none",
+			handoff:     secs(3, 2, 1),
+			wantHandoff: secs(3, 2, 1),
+		},
+		"a repeated session marker counts once": {
+			cfg:         Config{KeepSections: 2},
+			heading:     "# Handover, 2026-11-01 09:00: new\n<!-- session: s-3 -->",
+			handoff:     secs(3, 2, 1),
+			wantHandoff: "# Handover, 2026-11-01 09:00: new\n<!-- session: s-3 -->\n\nDone: the widget, shipped.\n\n" + secs(3, 2),
+			wantLog:     "kept 3 sections, removed 1",
+		},
+		"headings in code fences are not sections": {
+			cfg:         Config{KeepSections: 2},
+			handoff:     fenced + sec(1),
+			wantHandoff: newSection + fenced,
+			wantLog:     "kept 2 sections, removed 1",
+		},
+		"a hand-written file is left alone": {
+			cfg:         Config{KeepSections: 1},
+			heading:     "# Handover 2026-09-29",
+			handoff:     "# My notes\n\n- a\n\n# More\n\n- b\n",
+			wantHandoff: "# Handover 2026-09-29\n\nDone: the widget, shipped.\n\n# My notes\n\n- a\n\n# More\n\n- b\n",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			if err := Save(tc.cfg); err != nil {
+				t.Fatal(err)
+			}
+			r.write("HANDOFF.md", tc.handoff)
+			if tc.archive != "" {
+				r.write("HANDOFF.archive.md", tc.archive)
+			}
+			r.git("add", ".")
+			r.git("commit", "-q", "-m", "setup")
+			if err := os.Chmod(filepath.Join(r.repo, "HANDOFF.md"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+
+			heading := tc.heading
+			if heading == "" {
+				heading = newHeading
+			}
+			mode := tc.mode
+			if mode == "" {
+				mode = "write"
+			}
+			log := r.writeNow("FAKE_CLAUDE_HEADING="+heading, "FAKE_CLAUDE_MODE="+mode)
+
+			if got, _ := r.read("HANDOFF.md"); got != tc.wantHandoff {
+				t.Errorf("HANDOFF.md:\n%s\nwant:\n%s", got, tc.wantHandoff)
+			}
+			wantArchive := tc.wantArchive
+			if wantArchive == "" {
+				wantArchive = tc.archive
+			}
+			got, ok := r.read("HANDOFF.archive.md")
+			if wantArchive == "" && ok {
+				t.Errorf("no archive was asked for, got:\n%s", got)
+			}
+			if wantArchive != "" && got != wantArchive {
+				t.Errorf("HANDOFF.archive.md:\n%s\nwant:\n%s", got, wantArchive)
+			}
+			if tc.wantLog != "" && !strings.Contains(log, "trim   "+r.root+": "+tc.wantLog) {
+				t.Errorf("log is missing %q:\n%s", tc.wantLog, log)
+			}
+			if tc.wantLog == "" && strings.Contains(log, "trim ") {
+				t.Errorf("nothing to trim, yet the log says:\n%s", log)
+			}
+			if fi, err := os.Stat(filepath.Join(r.repo, "HANDOFF.md")); err != nil || fi.Mode().Perm() != 0o640 {
+				t.Errorf("HANDOFF.md must keep its mode: %v %v", fi.Mode(), err)
+			}
+			if left, _ := filepath.Glob(filepath.Join(r.repo, ".*.tmp")); len(left) > 0 {
+				t.Errorf("temp files left behind: %v", left)
+			}
+		})
+	}
+}
+
+func TestTrimCommitsTheArchiveWithTheHandover(t *testing.T) {
+	r := newRig(t)
+	if err := Save(Config{KeepSections: 1, ArchiveTrimmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	r.write("HANDOFF.md", secs(2, 1))
+	r.git("commit", "-q", "-am", "setup")
+	head := r.git("rev-parse", "HEAD")
+
+	if log := r.writeNow("FAKE_CLAUDE_HEADING=" + newHeading); !strings.Contains(log, "committed") {
+		t.Fatalf("want a commit:\n%s", log)
+	}
+	if r.git("rev-parse", "HEAD~1") != head {
+		t.Fatal("expected exactly one new commit")
+	}
+	if files := r.git("show", "--name-only", "--format=", "HEAD"); files != "HANDOFF.archive.md\nHANDOFF.md" {
+		t.Fatalf("the commit must hold HANDOFF.md and its archive, got %q", files)
+	}
+	if st := r.git("status", "--porcelain"); st != "" {
+		t.Fatalf("nothing may be left uncommitted: %q", st)
+	}
+	if got, _ := r.read("HANDOFF.archive.md"); got != secs(2, 1) {
+		t.Fatalf("archive:\n%s", got)
+	}
+}
+
+func TestTrimKeepsTheArchiveLocalWhenTheHandoverIsIgnored(t *testing.T) {
+	r := newRig(t)
+	if err := Save(Config{KeepSections: 1, ArchiveTrimmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	r.git("rm", "-q", "--cached", "HANDOFF.md")
+	r.write(".gitignore", "HANDOFF.md\n")
+	r.write("HANDOFF.md", secs(2, 1))
+	r.git("add", ".gitignore")
+	r.git("commit", "-q", "-m", "keep the handover local")
+	head := r.git("rev-parse", "HEAD")
+
+	if log := r.writeNow("FAKE_CLAUDE_HEADING=" + newHeading); !strings.Contains(log, "local only") {
+		t.Fatalf("want a local-only write:\n%s", log)
+	}
+	if got, _ := r.read("HANDOFF.archive.md"); got != secs(2, 1) {
+		t.Fatalf("archive:\n%s", got)
+	}
+	if r.git("rev-parse", "HEAD") != head {
+		t.Fatal("an ignored handover must not be committed")
+	}
+	if st := r.git("status", "--porcelain"); st != "" {
+		t.Fatalf("the archive must be ignored like HANDOFF.md: %q", st)
+	}
+	if got, _ := r.read(".gitignore"); got != "HANDOFF.md\n" {
+		t.Fatalf(".gitignore must be left alone, got %q", got)
+	}
+}
+
+func TestTrimWithAutoCommitOffCommitsNothing(t *testing.T) {
+	r := newRig(t)
+	if err := Save(Config{NoCommit: true, KeepSections: 1, ArchiveTrimmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	r.write("HANDOFF.md", secs(2, 1))
+	r.git("commit", "-q", "-am", "setup")
+	head := r.git("rev-parse", "HEAD")
+
+	if log := r.writeNow("FAKE_CLAUDE_HEADING=" + newHeading); !strings.Contains(log, "not committed: auto-commit is off") {
+		t.Fatalf("want an uncommitted write:\n%s", log)
+	}
+	if r.git("rev-parse", "HEAD") != head {
+		t.Fatal("auto-commit is off")
+	}
+	if got, _ := r.read("HANDOFF.md"); got != newSection {
+		t.Fatalf("HANDOFF.md:\n%s", got)
+	}
+	if got, _ := r.read("HANDOFF.archive.md"); got != secs(2, 1) {
+		t.Fatalf("archive:\n%s", got)
+	}
+}
+
+func TestAFailedTrimLosesNothing(t *testing.T) {
+	r := newRig(t)
+	if err := Save(Config{KeepSections: 1, ArchiveTrimmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	r.write("HANDOFF.md", secs(2, 1))
+	r.git("commit", "-q", "-am", "setup")
+	if err := os.Mkdir(filepath.Join(r.repo, "HANDOFF.archive.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	log := r.writeNow("FAKE_CLAUDE_HEADING=" + newHeading)
+	if !strings.Contains(log, "FAILED "+r.root+": trim failed, nothing removed") || !strings.Contains(log, "committed") {
+		t.Fatalf("want a failed trim, then the write committed as usual:\n%s", log)
+	}
+	if got, _ := r.read("HANDOFF.md"); got != newSection+secs(2, 1) {
+		t.Fatalf("a failed trim must leave every section in HANDOFF.md:\n%s", got)
+	}
+	if left, _ := filepath.Glob(filepath.Join(r.repo, ".*.tmp")); len(left) > 0 {
+		t.Fatalf("temp files left behind: %v", left)
 	}
 }

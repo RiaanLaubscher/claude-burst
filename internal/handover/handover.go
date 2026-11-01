@@ -7,7 +7,8 @@
 //   - SessionEnd (end.sh) fires when a session closes, including when its
 //     Ghostty window is closed, and starts write.sh detached: it resumes a
 //     fork of the finished session, has it update HANDOFF.md, and commits that
-//     one file locally. It never pushes.
+//     file (and HANDOFF.archive.md, when a trim archived to it) locally. It
+//     never pushes.
 //
 // Both are opt-in per repo: they do nothing unless the git root has a
 // HANDOFF.md. This has nothing to do with routing; it lives in claude-burst
@@ -43,6 +44,7 @@ const (
 	DefaultMinPrompts = 2
 	DefaultModel      = "opus"
 	MaxMinPrompts     = 50
+	MaxKeepSections   = 500
 	maxTextBytes      = 16 * 1024
 	hookTimeout       = 10
 )
@@ -72,29 +74,34 @@ Rules:
 // empty or missing file is the recommended setup and a changed default text
 // reaches everyone who never edited theirs.
 type Config struct {
-	NoBrief      bool   `json:"no_brief,omitempty"`
-	NoWrite      bool   `json:"no_write,omitempty"`
-	NoCommit     bool   `json:"no_commit,omitempty"`
-	MinPrompts   int    `json:"min_prompts,omitempty"`
-	Model        string `json:"model,omitempty"`
-	Briefing     string `json:"briefing,omitempty"`
-	Instructions string `json:"instructions,omitempty"`
+	NoBrief        bool   `json:"no_brief,omitempty"`
+	NoWrite        bool   `json:"no_write,omitempty"`
+	NoCommit       bool   `json:"no_commit,omitempty"`
+	MinPrompts     int    `json:"min_prompts,omitempty"`
+	KeepSections   int    `json:"keep_sections,omitempty"`
+	ArchiveTrimmed bool   `json:"archive_trimmed,omitempty"`
+	Model          string `json:"model,omitempty"`
+	Briefing       string `json:"briefing,omitempty"`
+	Instructions   string `json:"instructions,omitempty"`
 }
 
 // effective is what the scripts read: every field resolved.
 type effective struct {
-	Brief        bool   `json:"brief"`
-	Write        bool   `json:"write"`
-	Commit       bool   `json:"commit"`
-	MinPrompts   int    `json:"min_prompts"`
-	Model        string `json:"model"`
-	Briefing     string `json:"briefing"`
-	Instructions string `json:"instructions"`
+	Brief          bool   `json:"brief"`
+	Write          bool   `json:"write"`
+	Commit         bool   `json:"commit"`
+	MinPrompts     int    `json:"min_prompts"`
+	KeepSections   int    `json:"keep_sections"`
+	ArchiveTrimmed bool   `json:"archive_trimmed"`
+	Model          string `json:"model"`
+	Briefing       string `json:"briefing"`
+	Instructions   string `json:"instructions"`
 }
 
 func (c Config) effective() effective {
 	e := effective{Brief: !c.NoBrief, Write: !c.NoWrite, Commit: !c.NoCommit,
-		MinPrompts: c.MinPrompts, Model: c.Model, Briefing: c.Briefing, Instructions: c.Instructions}
+		MinPrompts: c.MinPrompts, KeepSections: c.KeepSections, ArchiveTrimmed: c.ArchiveTrimmed,
+		Model: c.Model, Briefing: c.Briefing, Instructions: c.Instructions}
 	if e.MinPrompts == 0 {
 		e.MinPrompts = DefaultMinPrompts
 	}
@@ -129,6 +136,8 @@ func (c Config) Normalize() (Config, error) {
 	switch {
 	case c.MinPrompts < 0 || c.MinPrompts > MaxMinPrompts:
 		return c, fmt.Errorf("minimum prompts must be between 1 and %d", MaxMinPrompts)
+	case c.KeepSections < 0 || c.KeepSections > MaxKeepSections:
+		return c, fmt.Errorf("sections to keep must be between 0 (keep all) and %d", MaxKeepSections)
 	case strings.ContainsAny(c.Model, " \t\n'\"$`\\;&|<>"):
 		return c, errors.New("model must be a single model name or alias, such as opus or claude-sonnet-5")
 	case len(c.Briefing) > maxTextBytes || len(c.Instructions) > maxTextBytes:
