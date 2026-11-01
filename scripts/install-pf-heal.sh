@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Installs (or removes) the pf self-heal LaunchDaemon: a root job that runs
-# scripts/pf-heal.sh every 30s and on every network change to notice when
+# scripts/pf-heal.sh every 5s and on every network change to notice when
 # transparent mode's pf rdr rule has been dropped from the loaded ruleset, reload it, and -- if it cannot
 # -- remove the redirect so this Mac can reach Anthropic directly again.
 #
@@ -131,7 +131,7 @@ do_uninstall() {
   # Only its own files: the directory is shared with the lid-awake daemon,
   # and deleting that one's script leaves a KeepAlive daemon pointing at
   # nothing, with SleepDisabled possibly left on.
-  rm -f "$SCRIPT" "$LIBEXEC/transparent-root.sh"
+  rm -f "$SCRIPT" "$LIBEXEC/transparent-root.sh" "$LIBEXEC/install-pf-heal.sh"
   rmdir "$LIBEXEC" 2>/dev/null || true
   # Without this, status() reads a heartbeat from a daemon that no longer
   # exists and reports RUNNING for the next ten minutes.
@@ -164,6 +164,11 @@ do_install() {
 
   "$INSTALL_BIN" -d "${OWNER_ARGS[@]}" -m 755 "$LIBEXEC"
   "$INSTALL_BIN" "${OWNER_ARGS[@]}" -m 755 "$ROOT/scripts/pf-heal.sh" "$ROOT/scripts/transparent-root.sh" "$LIBEXEC/"
+  # A copy of this installer too, never run from here: the dashboard compares
+  # all three with the repo's so an update that changes any of them (the plist
+  # this file writes included) says the guard needs re-arming. Updates cannot
+  # do it themselves without sudo, and until 30 Oct 2026 nothing said so.
+  "$INSTALL_BIN" "${OWNER_ARGS[@]}" -m 644 "$ROOT/scripts/install-pf-heal.sh" "$LIBEXEC/"
 
   mkdir -p "$(dirname "$PLIST")"
   # The daemon runs the INSTALLED transparent-root.sh, not the repo's, so a
@@ -176,8 +181,8 @@ do_install() {
   # network change, so the daemon now runs the moment the network changes
   # (pf-heal.sh then watches the path for a minute, because whatever reloads
   # pf does so a few seconds AFTER the change). /etc/pf.conf is watched for
-  # the other software that rewrites pf. The interval drops to 30s as the
-  # backstop: a healthy cycle is one local curl.
+  # the other software that rewrites pf. The interval is 5s as the
+  # backstop (it was 30s until 30 Oct 2026): a healthy cycle is one local curl.
   cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -193,7 +198,7 @@ do_install() {
   <dict>
     <key>CLAUDE_BURST_ROOT_HELPER</key><string>$LIBEXEC/transparent-root.sh</string>
   </dict>
-  <key>StartInterval</key><integer>30</integer>
+  <key>StartInterval</key><integer>5</integer>
   <key>WatchPaths</key>
   <array>
     <string>/var/run/resolv.conf</string>
@@ -218,7 +223,7 @@ PLIST
   cat <<OUT
 
 Installed pf self-heal LaunchDaemon: $LABEL
-Runs as root every 30s AND on every network change. Each cycle:
+Runs as root every 5s AND on every network change. Each cycle:
   - no /etc/hosts redirect installed -> does nothing (a rollback stays rolled back)
   - pf rdr rule loaded               -> does nothing, silently
   - rule missing                     -> logs it, runs 'transparent-root.sh reload-anchor',
@@ -282,6 +287,7 @@ self_test() {
 
   [[ -x "$SCRIPT" ]] && ok "pf-heal.sh copied and executable" || bad "pf-heal.sh not installed at $SCRIPT"
   [[ -x "$LIBEXEC/transparent-root.sh" ]] && ok "transparent-root.sh copied" || bad "transparent-root.sh not installed"
+  cmp -s "$ROOT/scripts/install-pf-heal.sh" "$LIBEXEC/install-pf-heal.sh" && ok "installer copied for the dashboard to compare" || bad "install-pf-heal.sh not copied to $LIBEXEC"
   [[ -f "$PLIST" ]] && ok "plist written" || bad "no plist at $PLIST"
   grep -q "bootstrap system $PLIST" "$tmp/launchctl.calls" 2>/dev/null \
     && ok "daemon bootstrapped" || bad "launchctl bootstrap was never called"
@@ -306,7 +312,7 @@ self_test() {
   run do_uninstall
   (( rc == 0 )) && ok "do_uninstall completes" || { bad "do_uninstall exited $rc"; printf '%s\n' "$out" | sed 's/^/      /'; }
   [[ -e "$PLIST" ]] && bad "uninstall left the plist behind" || ok "uninstall removed the plist"
-  [[ -e "$SCRIPT" || -e "$LIBEXEC/transparent-root.sh" ]] && bad "uninstall left its scripts behind" || ok "uninstall removed its own scripts"
+  [[ -e "$SCRIPT" || -e "$LIBEXEC/transparent-root.sh" || -e "$LIBEXEC/install-pf-heal.sh" ]] && bad "uninstall left its scripts behind" || ok "uninstall removed its own scripts"
   [[ -e "$LIBEXEC/lid-awake-root.sh" ]] && ok "uninstall kept the lid-awake script" || bad "uninstall deleted the lid-awake daemon's script"
   rm -f "$LIBEXEC/lid-awake-root.sh"
   [[ -e "$HEARTBEAT" ]] && bad "uninstall left the heartbeat behind" || ok "uninstall cleared the heartbeat"

@@ -106,6 +106,14 @@ LSOF="${CLAUDE_BURST_LSOF:-/usr/sbin/lsof}"
 # failure path; it sets both to 0, which still tries once.
 HEALTH_PROBE_BUDGET="${CLAUDE_BURST_HEALTH_PROBE_BUDGET:-10}"
 HEALTH_PROBE_SLEEP="${CLAUDE_BURST_HEALTH_PROBE_SLEEP:-1}"
+# The quick verdict, before that budget: the pauses between the first probes
+# (1s, then 2s), after which a real path that still fails while the gateway
+# answers its own dashboard is a broken redirect, repaired at once. On
+# 30 Oct 2026 the redirect broke 41 times, and each break ran 30 to 50s
+# (up to 30s to the next cycle, 10s of probes, then the repair) with every
+# Claude Code request refused, longer than Claude Code's own retries wait.
+FAST_CONFIRM_SLEEPS="${CLAUDE_BURST_FAST_CONFIRM_SLEEPS:-1 2}"
+DASHBOARD_URL="${CLAUDE_BURST_DASHBOARD_URL:-http://127.0.0.1:7788/api/mod}"
 ROOT_HELPER="${CLAUDE_BURST_ROOT_HELPER:-$DIR/transparent-root.sh}"
 # Indirected so --self-test can substitute a stub. Every branch below turns on
 # what pfctl reports, and a decision tree that can only be exercised on a
@@ -222,20 +230,71 @@ intercept_path_healthy() {
   # exact same path OK every one of those cycles, moments earlier -- and
   # pf-heal gave up and tore down a working redirect on the strength of that
   # single bad reading, four times over, not on four real outages.
-  local waited=0 attempts=0 body
-  while true; do
-    attempts=$((attempts + 1))
-    body="$($CURL -s -m 2 "https://$INTERCEPT_HOST/healthz" 2>/dev/null)"
-    if printf '%s' "$body" | grep -q '"overflow"'; then
-      (( attempts > 1 )) && log "  real path answered on attempt $attempts (${waited}s in)"
+  local waited=0 attempts=1 pause
+  real_path_probe && return 0
+  for pause in ${=FAST_CONFIRM_SLEEPS}; do
+    sleep "$pause"
+    waited=$((waited + pause)); attempts=$((attempts + 1))
+    if real_path_probe; then
+      log "  real path answered on attempt $attempts (${waited}s in)"
       return 0
     fi
-    (( waited >= HEALTH_PROBE_BUDGET )) && break
+  done
+  # The gateway's dashboard is reached directly, never through pf. When it
+  # answers and the real path does not, the gateway is running and the
+  # redirect is what failed: waiting out the rest of the budget only keeps
+  # every Claude Code request refused for longer. When it does not answer
+  # either (a gateway stalled on a Mac short of memory, or restarting), a
+  # reload would cut every stream for nothing, so the full budget runs.
+  if (( attempts > 1 )) && dashboard_answers; then
+    log "  real path did not answer in $attempts attempt(s) over ${waited}s, while the gateway answers its dashboard: the redirect failed"
+    return 1
+  fi
+  while (( waited < HEALTH_PROBE_BUDGET )); do
     sleep "$HEALTH_PROBE_SLEEP"
-    waited=$((waited + HEALTH_PROBE_SLEEP))
+    waited=$((waited + HEALTH_PROBE_SLEEP)); attempts=$((attempts + 1))
+    if real_path_probe; then
+      log "  real path answered on attempt $attempts (${waited}s in)"
+      return 0
+    fi
   done
   (( attempts > 1 )) && log "  real path did not answer in $attempts attempt(s) over ${waited}s"
   return 1
+}
+
+# One probe of the real path: the body must be the gateway's own.
+real_path_probe() {
+  $CURL -s -m 2 "https://$INTERCEPT_HOST/healthz" 2>/dev/null | grep -q '"overflow"'
+}
+
+# The gateway answering its dashboard, over loopback with no pf in the way.
+dashboard_answers() {
+  $CURL -sf -o /dev/null -m 2 "$DASHBOARD_URL" 2>/dev/null
+}
+
+# What pf and loopback look like at the moment of a break, written before the
+# repair changes it. Added 31 Oct 2026, at 61 breaks a day: the rule is loaded
+# and referenced at every break, the anchor-only reload has failed at every
+# one, the main ruleset reload has fixed every one, and the dashboard check
+# that should have shortened them has never once answered. Those point at pf
+# refusing loopback connections in general (a full state table, or rules
+# other software added), and only root can look, so the daemon does it here.
+pf_snapshot() {
+  local gport="$1"
+  log "  snapshot: dashboard :7788 http=$($CURL -s -o /dev/null -w '%{http_code}' -m 2 "$DASHBOARD_URL" 2>/dev/null) direct :$gport http=$($CURL -sk -o /dev/null -w '%{http_code}' -m 2 "https://127.0.0.1:$gport/healthz" 2>/dev/null)"
+  {
+    echo "    -- pfctl -si (states and refusal counters)"
+    "$PFCTL" -si 2>/dev/null | grep -iE 'status|current entries|searches|inserts|removals|state-|memory|src-limit|congestion|synproxy|translate|match' | sed 's/^/      /'
+    echo "    -- pfctl -sm (limits)"
+    "$PFCTL" -sm 2>/dev/null | sed 's/^/      /'
+    echo "    -- skipped interfaces"
+    "$PFCTL" -sI -v 2>/dev/null | grep -i skip | sed 's/^/      /'
+    echo "    -- main ruleset nat/rdr"
+    "$PFCTL" -sn 2>/dev/null | head -20 | sed 's/^/      /'
+    echo "    -- anchors"
+    "$PFCTL" -sA 2>/dev/null | head -20 | sed 's/^/      /'
+    "$PFCTL" -a com.apple -sA 2>/dev/null | head -20 | sed 's/^/      /'
+  } >> "$LOG" 2>/dev/null || true
 }
 
 # Is anything listening on the gateway port at all? Distinguishes "pf is not
@@ -361,6 +420,7 @@ if anchor_referenced; then ref=referenced; else ref=NOT-REFERENCED; fi
 if gateway_listening; then gw=listening;   else gw=DOWN;           fi
 pf="$(pf_status)"
 log "BROKEN: /etc/hosts redirects $INTERCEPT_HOST here but it does not answer from this gateway -- every process on this Mac is affected (pf: $pf, rdr rule: $rdr, main ruleset: $ref, gateway on :$gport: $gw)"
+pf_snapshot "$gport"
 
 if (( CHECK_ONLY )); then
   log "check: --check given, so nothing was repaired."
@@ -531,6 +591,13 @@ self_test() {
   # sleep. Zero still tries exactly once (see intercept_path_healthy).
   HEALTH_PROBE_BUDGET=0
   HEALTH_PROBE_SLEEP=0
+  FAST_CONFIRM_SLEEPS=""
+  # The dashboard answers when the gateway is up; a stub, so the fake curl's
+  # call count (break-at) counts only real path probes.
+  dashboard_answers() { [[ -f "$tmp/gw" ]]; }
+  # Its own curls would count as path probes; what matters here is that a
+  # break takes one, before the repair.
+  pf_snapshot() { echo "$1" >> "$tmp/snapshots"; }
   notify() { :; }
   # Restarting a LaunchAgent needs a console user and a real launchd; the stub
   # records the attempt and flips the gateway flag, which is what the decision
@@ -704,6 +771,25 @@ STUB
   run
   want "BROKEN" && ok "--check reports the outage" || bad "--check did not report" show
   [[ -f "$tmp/restarts" ]] && bad "--check restarted the gateway" || ok "--check changed nothing"
+  CHECK_ONLY=0; touch "$tmp/gw"
+
+  # 9. The quick verdict: the redirect fails while the gateway answers its
+  # dashboard, so the repair runs after the short confirmation, not the
+  # whole budget. With the gateway not answering, the budget still runs.
+  FAST_CONFIRM_SLEEPS="0 0"; HEALTH_PROBE_BUDGET=1; HEALTH_PROBE_SLEEP=1
+  rm -f "$tmp/rdr" "$tmp/curlcalls"
+  run
+  want "the redirect failed" && ok "redirect down, gateway up -> repaired after the quick confirmation" || bad "quick verdict not reached" show
+  want "HEALED" && ok "quick verdict repaired it" || bad "quick verdict did not repair" show
+  [[ "$(cat "$tmp/curlcalls")" == 4 ]] && ok "3 probes before the repair, 1 after" || bad "probed $(cat "$tmp/curlcalls") times, want 4" show
+  rm -f "$tmp/rdr" "$tmp/curlcalls"
+  dashboard_answers() { return 1; }
+  run
+  want "the redirect failed" && bad "repaired at once with the gateway not answering" show || ok "gateway not answering -> the full budget runs first"
+  dashboard_answers() { [[ -f "$tmp/gw" ]]; }
+  FAST_CONFIRM_SLEEPS=""; HEALTH_PROBE_BUDGET=0; HEALTH_PROBE_SLEEP=0
+
+  [[ -s "$tmp/snapshots" ]] && ok "a break writes a pf snapshot before repairing" || bad "no break wrote a pf snapshot"
 
   echo
   if (( fails == 0 )); then echo "self-test: all checks passed"; return 0; fi
