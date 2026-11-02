@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -425,6 +426,11 @@ type History struct {
 // first rotation. Backups whose last write predates the window are skipped
 // without opening them: events are appended in time order, so a file's
 // mtime is its newest event.
+func dayNum(t time.Time) int {
+	y, m, d := t.Local().Date()
+	return y*10000 + int(m)*100 + d
+}
+
 func Daily(path string, days int) (History, error) {
 	if days <= 0 {
 		days = 14
@@ -436,11 +442,11 @@ func Daily(path string, days int) (History, error) {
 		AddDate(0, 0, -(days - 1))
 
 	h := History{Days: make([]Day, 0, days)}
-	index := map[string]int{}
+	index := map[int]int{}
 	daySessions := map[string]map[string]struct{}{}
 	for d := start; !d.After(now); d = d.AddDate(0, 0, 1) {
 		key := d.Format("2006-01-02")
-		index[key] = len(h.Days)
+		index[dayNum(d)] = len(h.Days)
 		h.Days = append(h.Days, Day{Date: key})
 		daySessions[key] = map[string]struct{}{}
 	}
@@ -463,7 +469,7 @@ func Daily(path string, days int) (History, error) {
 			if e.Time.Before(start) {
 				return
 			}
-			i, ok := index[e.Time.Local().Format("2006-01-02")]
+			i, ok := index[dayNum(e.Time)]
 			if !ok {
 				// A timestamp in the future, or one the day loop above did
 				// not produce. Counted in the window totals but not placed
@@ -676,11 +682,8 @@ func percentile(v []int64, p float64) int64 {
 	if len(v) == 0 {
 		return 0
 	}
-	sort.Slice(v, func(i, j int) bool { return v[i] < v[j] })
-	i := int(float64(len(v))*p+0.5) - 1
-	if i < 0 {
-		i = 0
-	}
+	slices.Sort(v)
+	i := max(int(float64(len(v))*p+0.5)-1, 0)
 	if i >= len(v) {
 		i = len(v) - 1
 	}

@@ -112,11 +112,9 @@ func TestHeldEventsReadWhileAppended(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "metrics.jsonl")
 	appendTo(t, path, eventLine(t, "0"))
 	var wg sync.WaitGroup
-	for r := 0; r < 4; r++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < 50; i++ {
+	for range 4 {
+		wg.Go(func() {
+			for range 50 {
 				n := 0
 				_ = scanEvents(path, func(e Event) { n++ })
 				if n == 0 {
@@ -124,7 +122,7 @@ func TestHeldEventsReadWhileAppended(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	for i := 1; i <= 200; i++ {
 		appendTo(t, path, eventLine(t, fmt.Sprint(i)))

@@ -143,7 +143,7 @@ func TestSummarizeFlagsUnpricedAndKeepsTotalHonest(t *testing.T) {
 		InputTokens: 1_000_000, OutputTokens: 0, APIEquivalentUSD: 5}); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if err := w.Write(Event{Slot: "secondary", Route: "together", Model: "vendor/some-model",
 			InputTokens: 500_000, PricingUnknown: true}); err != nil {
 			t.Fatal(err)

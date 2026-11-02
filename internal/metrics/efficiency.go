@@ -25,7 +25,7 @@ type Efficiency struct {
 	PrunedBytes      int64     `json:"pruned_bytes"`
 	StubbedResults   int64     `json:"stubbed_results"`
 	TruncatedResults int64     `json:"truncated_results"`
-	LastPrunedAt     time.Time `json:"last_pruned_at,omitempty"`
+	LastPrunedAt     time.Time `json:"last_pruned_at"`
 
 	// RerunsAfterStub counts the model's calls that asked again for output a
 	// stub had removed; RepeatedCalls counts every exact repeat of an

@@ -18,6 +18,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -79,10 +80,9 @@ func (r *Resolver) Resolve(session string) (name, root string) {
 	if t, ok := r.miss[session]; ok && r.now().Sub(t) < missTTL {
 		return Unknown, ""
 	}
-	matches, _ := filepath.Glob(filepath.Join(r.dir, "*", session+".jsonl"))
 	cwd := ""
-	if len(matches) > 0 {
-		cwd = transcriptCwd(matches[0])
+	if path := r.transcriptPath(session); path != "" {
+		cwd = transcriptCwd(path)
 	}
 	if cwd == "" {
 		if len(r.miss) > 10000 {
@@ -95,6 +95,21 @@ func (r *Resolver) Resolve(session string) (name, root string) {
 	name, root = r.repoOf(cwd)
 	r.hit[session] = [2]string{name, root}
 	return name, root
+}
+
+func (r *Resolver) transcriptPath(session string) string {
+	ents, err := os.ReadDir(r.dir)
+	if err != nil {
+		return ""
+	}
+	name := session + ".jsonl"
+	for _, e := range ents {
+		path := filepath.Join(r.dir, e.Name(), name)
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
 }
 
 // plainID reports whether a session id can be a transcript's file name. The
@@ -187,8 +202,8 @@ type FolderAccess struct {
 	Folder string    `json:"folder"` // "Desktop"
 	Path   string    `json:"path"`
 	State  string    `json:"state"`
-	At     time.Time `json:"at,omitempty"` // the last observation
-	Repos  []string  `json:"repos"`        // repository roots found under it
+	At     time.Time `json:"at"`    // the last observation
+	Repos  []string  `json:"repos"` // repository roots found under it
 }
 
 var access struct {
@@ -255,10 +270,8 @@ func noteRepo(root string) {
 	access.mu.Lock()
 	defer access.mu.Unlock()
 	e := accessEntry(f)
-	for _, r := range e.Repos {
-		if r == root {
-			return
-		}
+	if slices.Contains(e.Repos, root) {
+		return
 	}
 	if len(e.Repos) < 50 {
 		e.Repos = append(e.Repos, root)
