@@ -1,7 +1,5 @@
 module github.com/andrewbakercloudscale/claude-burst
 
-go 1.24
-
-toolchain go1.27.2
+go 1.27.3
 
 require github.com/BurntSushi/toml v1.5.0
