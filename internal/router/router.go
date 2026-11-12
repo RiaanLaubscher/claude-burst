@@ -101,7 +101,9 @@ type Server struct {
 	// never silent. Held by failoverMu; not part of state.json.
 	failoverMu sync.Mutex
 	// alerts is what the on-screen alerts need to say a problem ended.
-	alerts          alertState
+	alerts alertState
+	// sent watches what sessions really send against their limits.
+	sent            sentWatch
 	failoverNotices []string
 
 	// health is whether the primary is answering right now, for the
@@ -132,6 +134,8 @@ type Server struct {
 	// outside transparent mode.
 	resolver        *interceptResolver
 	browserUpstream *url.URL
+	// wsTransport carries WebSocket upgrades: HTTP/1.1 only (websocket.go).
+	wsTransport http.RoundTripper
 }
 
 // Logf writes one line to the gateway log, for other components (the
@@ -237,6 +241,10 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
 }
 
 // Flush lets the SSE relay loop keep flushing through the wrapper.
+// Unwrap lets http.ResponseController reach the connection underneath, so
+// a WebSocket upgrade can take it over (websocket.go).
+func (sw *statusWriter) Unwrap() http.ResponseWriter { return sw.ResponseWriter }
+
 func (sw *statusWriter) Flush() {
 	if fl, ok := sw.ResponseWriter.(http.Flusher); ok {
 		fl.Flush()
@@ -277,6 +285,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	// Removes TraceHeader whatever it holds, so it is never forwarded.
 	r = s.withTrace(r, rid)
+	if isWebSocket(r) {
+		s.proxyWebSocket(w, r, rid)
+		return
+	}
 
 	// Read the body for every request, not just inference: Remote Control's
 	// register call (and any other control-plane POST) needs its body
@@ -293,25 +305,20 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("request exceeds configured max_request_mb=%d", s.cfg.MaxRequestMB), http.StatusRequestEntityTooLarge)
 		return
 	}
-	// Claude Code gzips /v1/messages bodies (CLAUDE_CODE_GZIP_REQUEST_BODIES,
-	// or its server-side rollout). Everything below reads the body as JSON --
-	// the model, automask, compaction -- so it is decoded here and sent on
-	// uncompressed. Left encoded, every one of them silently saw nothing.
-	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Content-Encoding")), "gzip") {
-		plain, err := gunzipLimited(body, maxBytes)
-		if errors.Is(err, errBodyTooLarge) {
-			s.logger.Printf("req=%s error stage=read_body reason=too_large_decoded limit_mb=%d", rid, s.cfg.MaxRequestMB)
-			http.Error(w, fmt.Sprintf("request exceeds configured max_request_mb=%d", s.cfg.MaxRequestMB), http.StatusRequestEntityTooLarge)
-			return
+	// Opened here, once, so compaction and everything else read JSON. See
+	// gzipbody.go.
+	if r2, plain, ok, err := gunzipRequest(r, body, maxBytes); err != nil {
+		s.logger.Printf("req=%s error stage=read_body reason=gzip err=%v", rid, err)
+		status := http.StatusBadRequest
+		if errors.Is(err, errInflatedTooLarge) {
+			status = http.StatusRequestEntityTooLarge
 		}
-		if err != nil {
-			s.logger.Printf("req=%s error stage=read_body reason=bad_gzip err=%v", rid, err)
-			http.Error(w, "failed decoding gzip request body", http.StatusBadRequest)
-			return
-		}
-		body = plain
-		r.Header.Del("Content-Encoding")
+		http.Error(w, "claude-burst: could not open the gzipped request body: "+err.Error(), status)
+		return
+	} else if ok {
+		r, body = r2, plain
 	}
+	s.alertUnreadable(r, body, rid)
 
 	// ONE RULE, applied twice below: a request that cannot fail over does not
 	// feed the failover detector either. Only /v1/messages can fail over, so
