@@ -6,6 +6,7 @@ package handover
 // scripts are laid down; these prove that what is laid down does its job.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -104,7 +105,7 @@ func (r *rig) write(name, body string) {
 func (r *rig) transcript(n int) string {
 	r.t.Helper()
 	var lines []string
-	for i := 0; i < n; i++ {
+	for i := range n {
 		lines = append(lines, `{"type":"user","message":{"role":"user","content":"do thing `+string(rune('a'+i))+`"}}`)
 	}
 	lines = append(lines,
@@ -165,8 +166,16 @@ func (r *rig) waitFor(substr string) string {
 
 func (r *rig) writeNow(extraEnv ...string) string {
 	r.t.Helper()
-	cmd := exec.Command(r.script("write.sh"), "sess-1", r.repo, r.root)
+	return r.writeIn(r.repo, r.root, extraEnv...)
+}
+
+func (r *rig) writeIn(cwd, root string, extraEnv ...string) string {
+	r.t.Helper()
+	ctx, cancel := context.WithTimeout(r.t.Context(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, r.script("write.sh"), "sess-1", cwd, root)
 	cmd.Env = append(append([]string{}, r.env...), extraEnv...)
+	cmd.WaitDelay = time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		r.t.Fatalf("write.sh: %v\n%s", err, out)
@@ -229,6 +238,31 @@ func TestHandoverWritesAndCommitsWhenASessionEnds(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(r.repo, ".git", "handover.lock")); !os.IsNotExist(err) {
 		t.Fatal("the repo lock must be released")
+	}
+}
+
+func TestHandoverWritesAndCommitsInALinkedWorktree(t *testing.T) {
+	r := newRig(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	r.git("worktree", "add", "-q", "-b", "feature", wt)
+	root := r.git("-C", wt, "rev-parse", "--show-toplevel")
+	gitDir := r.git("-C", wt, "rev-parse", "--absolute-git-dir")
+	start := r.git("rev-parse", "main")
+
+	if log := r.writeIn(wt, root); !strings.Contains(log, "wrote  "+root+", committed") {
+		t.Fatalf("want a committed write in the worktree:\n%s", log)
+	}
+	if r.git("rev-parse", "feature~1") != start {
+		t.Fatal("expected exactly one new commit on the worktree's branch")
+	}
+	if r.git("rev-parse", "main") != start {
+		t.Fatal("the main checkout's branch must not move")
+	}
+	if files := r.git("show", "--name-only", "--format=", "feature"); files != "HANDOFF.md" {
+		t.Fatalf("the commit must hold HANDOFF.md only, got %q", files)
+	}
+	if _, err := os.Stat(filepath.Join(gitDir, "handover.lock")); !os.IsNotExist(err) {
+		t.Fatal("the worktree's lock must be released")
 	}
 }
 

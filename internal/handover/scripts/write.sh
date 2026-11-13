@@ -129,8 +129,9 @@ trim() {
   fi
 }
 
-# one writer per repo at a time: closing Ghostty ends every tab's session at once
-lock="$root/.git/handover.lock"
+# one writer per checkout at a time: closing Ghostty ends every tab's session at once
+gitdir=$(git -C "$root" rev-parse --absolute-git-dir) || { say "FAILED $root: not a git checkout"; exit 1; }
+lock="$gitdir/handover.lock"
 for _ in $(seq 1 600); do mkdir "$lock" 2>/dev/null && break; sleep 1; done
 [[ -d "$lock" ]] || { say "FAILED $root: gave up waiting for $lock"; exit 1; }
 trap 'rmdir "$lock" 2>/dev/null' EXIT
