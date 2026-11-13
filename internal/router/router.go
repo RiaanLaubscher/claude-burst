@@ -132,10 +132,12 @@ type Server struct {
 	clientAuth
 	// resolver resolves the intercepted host bypassing /etc/hosts; nil
 	// outside transparent mode.
-	resolver        *interceptResolver
-	browserUpstream *url.URL
+	resolver *interceptResolver
 	// wsTransport carries WebSocket upgrades: HTTP/1.1 only (websocket.go).
 	wsTransport http.RoundTripper
+	// browserUpstream is where a browser's request to the intercepted host
+	// is passed through in transparent mode (guard.go); nil otherwise.
+	browserUpstream *url.URL
 }
 
 // Logf writes one line to the gateway log, for other components (the
@@ -273,6 +275,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.browserToUpstream(r) {
+		// A browser's WebSocket to the same host is passed through the
+		// same way, over HTTP/1.1 (websocket.go).
+		if isWebSocket(r) {
+			s.proxyWebSocket(w, r, rid)
+			return
+		}
 		s.passBrowserThrough(w, r)
 		return
 	}
