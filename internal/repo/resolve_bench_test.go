@@ -1,4 +1,4 @@
-package repo_test
+package repo
 
 import (
 	"fmt"
@@ -6,10 +6,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
-
-	"github.com/andrewbakercloudscale/claude-burst/internal/repo"
 )
 
+// 32 project directories of 118 transcripts, the shape of the projects
+// directory the lookup was measured against on 1 Nov 2026 (3,774
+// transcripts): a lookup's cost is in how many names it has to read.
 const (
 	benchProjectDirs = 32
 	benchPerDir      = 118
@@ -44,12 +45,12 @@ func benchProjects(b *testing.B) (projects, foundSession string) {
 
 func BenchmarkResolveMiss(b *testing.B) {
 	projects, _ := benchProjects(b)
-	r := repo.NewWith(projects, []string{"/private/tmp/"})
+	r := NewWith(projects, []string{"/private/tmp/"})
 	b.ReportAllocs()
 	i := 0
 	for b.Loop() {
 		i++
-		if name, _ := r.Resolve("gone-" + strconv.Itoa(i)); name != repo.Unknown {
+		if name, _ := r.Resolve("gone-" + strconv.Itoa(i)); name != Unknown {
 			b.Fatalf("resolved %q", name)
 		}
 	}
@@ -59,7 +60,7 @@ func BenchmarkResolveFound(b *testing.B) {
 	projects, found := benchProjects(b)
 	b.ReportAllocs()
 	for b.Loop() {
-		r := repo.NewWith(projects, []string{"/private/tmp/"})
+		r := NewWith(projects, []string{"/private/tmp/"})
 		if name, _ := r.Resolve(found); name != "proj" {
 			b.Fatalf("resolved %q", name)
 		}

@@ -2,6 +2,17 @@
 
 Written and designed by [Andrew Baker](https://github.com/andrewbakercloudscale), Group Chief Information Officer at [Capitec Bank](https://www.capitecbank.co.za/). Blog: [andrewbaker.ninja](https://andrewbaker.ninja/). LinkedIn: [andrew-baker-ninja](https://www.linkedin.com/in/andrew-baker-ninja/).
 
+> [!IMPORTANT]
+> ### Install: one line, recommended
+>
+> Open the Terminal app on your Mac, paste this line and press Return:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/andrewbakercloudscale/claude-burst/main/scripts/get.sh | bash
+> ```
+>
+> It checks the Mac, installs what is missing (Go, from Homebrew or go.dev), clones Burst to `~/claude-burst` (or updates the copy you have), installs it in transparent mode, offers to restart Claude Desktop so it trusts Burst, and ends with a green or red check. It asks for your password once (macOS may also show a window to allow its certificate). Rerun it any time to update. Ending the line with `bash -s -- --dry-run` instead of `bash` shows the plan and changes nothing; `CLAUDE_BURST_DIR=~/elsewhere bash` clones somewhere else. Works for [Claude Desktop](docs/claude-desktop.md) users too.
+
 > [!TIP]
 > ### ⚡ One-line setup: let Claude Code install it
 >
@@ -228,8 +239,8 @@ chmod +x ~/burst-bypass.sh && ~/burst-bypass.sh
 Needs macOS with Go 1.23+, the Xcode Command Line Tools and Claude Code already logged in; see [Requirements](#requirements).
 
 ```bash
-# 1. Clone the newest release tag from the Releases page (v0.20.53 at the time of writing)
-git clone --branch v0.20.53 https://github.com/andrewbakercloudscale/claude-burst.git
+# 1. Clone the newest release tag from the Releases page (v0.20.63 at the time of writing)
+git clone --branch v0.20.63 https://github.com/andrewbakercloudscale/claude-burst.git
 cd claude-burst
 
 #    Optional, from v0.20.30 on: check that the release key signed what you cloned. It prints
@@ -259,6 +270,8 @@ claude-burst open                            # the same, or the support console 
 ```
 
 If macOS asks whether "claude-burst" may access your Desktop (or Documents) folder after every update, run `scripts/signing-setup.sh` once: it signs builds with a local certificate so one Allow lasts. The dashboard's **Permissions** section shows whether the running build is signed and what macOS has allowed under Desktop, Documents and Downloads, and has buttons to set up signing and open the Privacy settings. The installer and `scripts/deploy.sh`, when run at a Terminal, press its **Check folder access** for you straight after starting the gateway, so macOS asks while you are there: click Allow on each. While one sits unanswered, the gateway's update check waits behind it and times out.
+
+**Using Claude Code through Claude Desktop** (its Code tab or Cowork) rather than a terminal? It works, with two differences: in transparent mode the CA must be trusted system-wide (the dashboard's Install does it) and Claude Desktop must be quit and reopened after the install, because Desktop gives its sessions its own CA bundle, written when it starts; and base-url mode does not reach Cowork. With no terminal panel to show the toasts, alerts go to macOS Notification Center. The support console's **Claude Desktop** row says whether Desktop's sessions reach Burst. See [Claude Desktop](docs/claude-desktop.md).
 
 OpenRouter, Bedrock and a metered API key are in [Providers](docs/providers.md). To keep Claude Code's Remote Control, switch to [transparent mode](docs/transparent-mode.md) from the dashboard's **Install** section once this works.
 
@@ -366,7 +379,8 @@ claude-burst version
 
 claude-burst configure --keep-awake-lid-closed true|false   # lid shut: keep Claude Code + Remote Control running
 claude-burst configure --keep-awake-power ac|always         # ac (default): only while plugged in
-sudo scripts/lid-awake-root.sh apply ac|always              # the root half; configure prints this
+claude-burst configure --keep-awake-min-battery 50          # on battery below this %, the lid sleeps the Mac anyway (0 = off)
+sudo scripts/lid-awake-root.sh apply ac|always [IDLE ACTIVITY] [--min-battery N]   # the root half; configure prints this
 sudo scripts/lid-awake-root.sh remove
 scripts/lid-awake-root.sh status
 

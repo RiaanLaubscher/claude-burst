@@ -218,6 +218,9 @@ type twin struct {
 	own bool
 }
 
+// strategyKey keeps a session's own requests apart from each subagent's
+// (CompactionStrategiesTracked says why). A struct key is built without an
+// allocation; the joined string it replaced was allocated for every event.
 type strategyKey struct{ session, agent, model string }
 
 type strategySession struct {
@@ -405,6 +408,9 @@ func CompactionStrategiesTracked(path string, since time.Time, fixedAt int64, de
 		}
 	}
 
+	// Every request's size twins are written into one buffer. record only
+	// adds them up, so nothing holds the slice once the request is counted;
+	// anything that keeps it must copy it first.
 	sizesBuf := make([]StrategyCost, len(st.Sizes))
 	for _, f := range historyFiles(path, since) {
 		err := scanEvents(f, func(e Event) {

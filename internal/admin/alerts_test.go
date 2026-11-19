@@ -145,7 +145,7 @@ func TestAlertKeepAwakeTurnsOffAndBack(t *testing.T) {
 	s := newTestServer(t)
 	alerts := captureAlerts(t)
 	live := keepawake.Status{SleepDisabled: true, SleepDisabledKnown: true, OnAC: true,
-		AppliedMode: config.KeepAwakeOnAC, DaemonInstalled: true, GhosttyNapOff: true}
+		AppliedMode: config.KeepAwakeOnAC, AppliedMinBattery: 50, BatteryPercent: 80, DaemonInstalled: true, GhosttyNapOff: true}
 	old := readKeepAwake
 	readKeepAwake = func() keepawake.Status { return live }
 	t.Cleanup(func() { readKeepAwake = old })
@@ -178,7 +178,7 @@ func TestAlertKeepAwakeTurnsOffAndBack(t *testing.T) {
 	since := func() []string { return alerts()[base:] }
 	a = &alertRounds{}
 	live = keepawake.Status{SleepDisabled: true, SleepDisabledKnown: true, OnAC: true,
-		AppliedMode: config.KeepAwakeOnAC, DaemonInstalled: true, GhosttyNapOff: true}
+		AppliedMode: config.KeepAwakeOnAC, AppliedMinBattery: 50, BatteryPercent: 80, DaemonInstalled: true, GhosttyNapOff: true}
 	s.alertKeepAwake(a, cfg, now)
 	live.SleepDisabled = false
 	s.alertKeepAwake(a, cfg, now.Add(30*time.Second))
@@ -201,6 +201,11 @@ func TestAlertKeepAwakeTurnsOffAndBack(t *testing.T) {
 	cfg.KeepAwakeIdleMinutes = 30
 	if r := keepAwakeOffReason(keepawake.Status{OnAC: true, LastActivity: now.Add(-31 * time.Minute)}, cfg, now, ""); !strings.Contains(r, "30 minutes") {
 		t.Errorf("idle reason = %q", r)
+	}
+	cfg.KeepAwakeIdleMinutes = 0
+	cfg.KeepAwakeLidClosedPower = config.KeepAwakeAlways
+	if r := keepAwakeOffReason(keepawake.Status{OnAC: false, BatteryPercent: 42}, cfg, now, ""); !strings.Contains(r, "42%, below the 50% minimum") {
+		t.Errorf("low battery reason = %q", r)
 	}
 }
 
@@ -299,6 +304,28 @@ func TestBypassAlertsOnStartAndOnChange(t *testing.T) {
 	got := alerts()
 	want := []string{"error: Burst bypassed: redirect removed", "ok: Burst back in the path",
 		"error: Burst bypassed: redirect removed", "error: Burst bypassed: settings no longer use it"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("alerts = %q, want %q", got, want)
+	}
+}
+
+// A bypass that lasts is said again every hour, with how long it has lasted,
+// and the reminders stop once Burst is back. Before, it was said once, and
+// on 16 Nov 2026 nobody saw that once for 19 hours.
+func TestBypassIsRemindedHourlyWhileItLasts(t *testing.T) {
+	alerts := captureAlerts(t)
+	var b bypassReminder
+	t0 := time.Date(2026, 11, 16, 14, 37, 0, 0, time.Local)
+	b.round(true, true, t0)                     // the change itself: alertBypass's job
+	b.round(true, true, t0.Add(59*time.Minute)) // too soon
+	b.round(true, true, t0.Add(61*time.Minute))
+	b.round(true, true, t0.Add(2*time.Hour)) // too soon after the last
+	b.round(true, true, t0.Add(3*time.Hour))
+	b.round(false, true, t0.Add(4*time.Hour)) // back
+	b.round(true, true, t0.Add(5*time.Hour))  // new bypass: alertBypass's job again
+	b.round(true, true, t0.Add(5*time.Hour+30*time.Minute))
+	got := alerts()
+	want := []string{"error: Burst still bypassed (1h)", "error: Burst still bypassed (3h)"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("alerts = %q, want %q", got, want)
 	}

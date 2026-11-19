@@ -106,7 +106,8 @@ launchctl enable "gui/$UID/$LABEL" >/dev/null 2>&1 || true
 # bootstrapped" if a previous rollback left it half-registered. It waits for
 # the old gateway to unload before bootstrapping: see launchagent-reload.sh.
 if ! reload_launchagent "$LABEL" "$PLIST"; then
-  echo "nothing past this point was changed" >&2
+  # Not "nothing was changed": the old gateway was already stopped.
+  echo "stopped here: settings.json, /etc/hosts, pf and the CA trust were not touched" >&2
   exit 1
 fi
 
@@ -207,6 +208,18 @@ else
   echo "WARNING: could not arm the pf self-heal daemon. The redirect is live but" >&2
   echo "         its rdr rule is unguarded. Run:" >&2
   echo "    sudo $DIR/install-pf-heal.sh" >&2
+fi
+
+# Claude Desktop hands the Claude Code its Code tab and Cowork run its own
+# CA bundle, written from the System keychain when Desktop starts (found
+# 17 Nov 2026), never NODE_EXTRA_CA_CERTS. A Desktop already open keeps
+# refusing the gateway until it is quit and reopened.
+desktop_app="${CLAUDE_BURST_APPLICATIONS_DIR:-/Applications}/Claude.app"
+[[ -d "$desktop_app" ]] || desktop_app="$HOME/Applications/Claude.app"
+if [[ -d "$desktop_app" ]]; then
+  echo
+  echo "Claude Desktop: quit it (Claude, Quit) and open it again, so its Code and Cowork"
+  echo "  sessions trust the gateway. It reads the System keychain's CAs only as it starts."
 fi
 
 echo

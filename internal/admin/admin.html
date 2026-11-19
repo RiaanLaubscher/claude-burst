@@ -826,6 +826,7 @@
    clicking them never flips the checkbox, each on its own row. */
 .mac-toggles .al-card { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; display: grid; gap: 8px; }
 .mac-toggles .al-card label { border: 0; padding: 0; }
+.nt-ch { display: grid; grid-template-columns: max-content max-content; gap: 8px 12px; align-items: center; margin-top: 10px; }
 .mac-toggles .al-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: 28px; }
 .mac-toggles .al-row span { grid-column: auto; margin: 0; }
 .mac-toggles .al-lbl { color: var(--text); font-size: 13px; }
@@ -1248,7 +1249,7 @@
       <div class="ic-panel">
       <h3 class="mac-h" style="margin-top:0">Compaction mode <span class="pill" id="icState">static</span></h3>
       <div class="row" style="gap:10px;margin:6px 0 10px;flex-wrap:wrap" role="radiogroup" aria-label="When to compact">
-        <label class="ic-choice"><input type="radio" name="icMode" value="" style="width:auto;margin:0 8px 0 0"><span><strong>Static</strong><br><span class="hint">One size for every repository.</span></span></label>
+        <label class="ic-choice"><input type="radio" name="icMode" value="fixed" style="width:auto;margin:0 8px 0 0"><span><strong>Static</strong><br><span class="hint">One size for every repository.</span></span></label>
         <label class="ic-choice"><input type="radio" name="icMode" value="intelligent" style="width:auto;margin:0 8px 0 0"><span><strong>Intelligent</strong><br><span class="hint">A size learned for each repository from a replay of its own requests.</span></span></label>
       </div>
       <div class="row" style="align-items:flex-end">
@@ -1808,6 +1809,10 @@
           <option value="480">for 8 hours after I last used it</option>
         </select>
       </label>
+      <label style="display:block;margin-top:10px;font-size:15px;font-weight:600;color:var(--text)">Sleep anyway on battery below
+        <input id="kaMinBatt" type="number" min="0" max="100" step="1" inputmode="numeric" style="width:64px;margin-left:8px;font-weight:normal">%
+      </label>
+      <div class="hint" style="margin-top:4px">On battery with less charge than this, a shut lid sleeps the Mac as usual whatever is chosen above, so a laptop kept awake in a bag does not run itself flat. 50% by default; 0 turns the check off. Plugged in, the charge does not matter.</div>
       <div class="hint" style="margin-top:4px">"Used" is a Claude Code turn, from this Mac or from your phone through Remote Control, or the lid being open. Once the time passes the Mac sleeps as usual; opening the lid wakes it and starts the time again, and if there is no network the hotspot is tried at once and then on the usual timing until the Mac is back online.</div>
       <div class="row" style="margin-top:10px">
         <button class="primary" id="kaApply" disabled>&#x2713; Apply</button>
@@ -1859,10 +1864,17 @@
   </section>
 
   <section id="sec-notify" style="scroll-margin-top:70px">
-    <h2>Notifications</h2>
+    <h2>Notifications <span class="applies" data-where="config.json alerts" data-when="now"></span></h2>
     <div class="body">
-      <div class="hint">Burst's notifications are the pop-ups the usage panel floats over Claude Code's Ghostty window, the same style as its loading notice: failing over to the secondary and back, limits, failures, the network, guards repairing the redirect, compaction and more. Each stays at least 10 seconds while Ghostty is in front. Switch them on or off under <a href="#" data-target="sec-sessions">Session options</a>, <b>Show gateway alerts on screen</b>. Burst no longer sends macOS notifications. Inside a session with the mod, the <a href="#" data-target="sec-band">In-session band</a> shows them as toasts instead, and shows a problem that is still standing as a line.</div>
-      <div class="row" style="margin-top:10px"><button id="ntTest">Send a test alert</button></div>
+      <div class="hint">Burst's alerts go out two ways. <b>On-screen toasts</b> are the pop-ups the usage panel floats over Claude Code's Ghostty window (and, inside a session with the mod, the <a href="#" data-target="sec-band">In-session band</a>'s toasts): failing over and back, limits, failures, the network, guards repairing the redirect, compaction and more. The panel has its own on/off switch too, under <a href="#" data-target="sec-sessions">Session options</a>. <b>macOS Notification Center</b> banners come from the Claude Burst app's notifier, listed as Claude Burst in System Settings, Notifications; they reach you in any app, not only over Ghostty. <b>Critical only</b> is errors plus: Burst bypassed, requests failing, the network down, the pf guard, a broken redirect or certificate, and a compaction that failed. The all-clear that ends one is sent wherever the problem went.</div>
+      <div class="nt-ch">
+        <label for="ntToasts"><b>On-screen toasts</b></label>
+        <select id="ntToasts"><option value="off">Off</option><option value="critical">Critical only</option><option value="all">All alerts</option></select>
+        <label for="ntNC"><b>macOS Notification Center</b></label>
+        <select id="ntNC"><option value="off">Off</option><option value="critical">Critical only</option><option value="all">All alerts</option></select>
+      </div>
+      <div id="ntPerm" class="hint" style="margin-top:8px"></div>
+      <div class="row" style="margin-top:10px"><button class="primary" id="ntSave" disabled>&#x2713; Save</button><button id="ntTest">Send a test alert</button><button id="ntTestNC">Send a test notification</button></div>
       <div id="ntNote"></div>
     </div>
   </section>
@@ -3336,7 +3348,7 @@ function renderCompaction(s) {
     }
     if (document.activeElement !== $("icFloor")) $("icFloor").value = Math.round((k.floor_tokens || 100000) / 1000);
     if (document.activeElement !== $("icBuffer")) $("icBuffer").value = k.buffer_percent ?? 20;
-    setMode(k.mode || "");
+    setMode(k.mode || "intelligent");
   }
   setPill("icState", !k.enabled ? "compaction off" : k.mode === "intelligent" ? "intelligent" : "static", k.enabled ? "ok" : "");
   loadLearned(false);
@@ -3516,7 +3528,7 @@ function savedFlash() {
 
 // Static or intelligent: one or the other. The chosen one's fields and
 // explanation are the only ones on the page.
-function getMode() { return document.querySelector('input[name="icMode"]:checked')?.value || ""; }
+function getMode() { return document.querySelector('input[name="icMode"]:checked')?.value || "intelligent"; }
 function setMode(m) {
   for (const r of document.querySelectorAll('input[name="icMode"]')) r.checked = r.value === m;
   showMode();
@@ -3549,7 +3561,7 @@ function renderLearned(v) {
   const k = n => n ? Math.round(n / 1000) + "k" : "-", on = v.enabled && v.mode === "intelligent";
   const rows = v.repos || [];
   if (!rows.length) {
-    $("icTable").innerHTML = `<div class="hint">No repository has been compacted in the last ${v.window_days} days, so there is nothing to learn from yet. Every repository compacts at ${v.enabled && v.mode === "intelligent" ? `${k(v.start)}, the middle of ${k(v.floor)} to ${k(v.fixed)}` : k(v.fixed)}.</div>`;
+    $("icTable").innerHTML = `<div class="hint">No repository has been compacted in the last ${v.window_days} days, so there is nothing to learn from yet. Every repository compacts at ${v.enabled && v.mode === "intelligent" ? `${k(v.start)} while it learns (range ${k(v.floor)} to ${k(v.fixed)})` : k(v.fixed)}.</div>`;
     return;
   }
   const src = {learned: ["learned", "p"], override: ["your override", "s"], off: ["never", "s"], fixed: ["fixed", "s"], start: ["starting size", "s"]};
@@ -6018,7 +6030,8 @@ function renderMac() {
   // A choice not yet applied survives a refresh; otherwise show what is saved.
   if (!kaPick) for (const r of document.querySelectorAll('input[name="kaMode"]')) r.checked = r.value === ka.mode;
   if (!kaPick) $("kaIdle").value = String(ka.idle_minutes || 0);
-  $("kaIdle").disabled = ((document.querySelector('input[name="kaMode"]:checked') || {}).value || "off") === "off";
+  if (!kaPick) $("kaMinBatt").value = String(ka.min_battery ?? 50);
+  $("kaIdle").disabled = $("kaMinBatt").disabled = ((document.querySelector('input[name="kaMode"]:checked') || {}).value || "off") === "off";
   kaUpdateApply();
   renderOriginal();
   const power = lv.on_ac ? "on mains power" : "on battery";
@@ -6030,6 +6043,11 @@ function renderMac() {
     html += until > new Date()
       ? ` Last used ${new Date(lv.last_activity).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}; with the lid shut it stays awake until at least <b>${until.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}</b>.`
       : ` Not used for ${ka.idle_minutes >= 60 ? ka.idle_minutes / 60 + " h" : ka.idle_minutes + " min"}: closing the lid now sleeps the Mac.`;
+  }
+  if (ka.mode !== "off" && ka.min_battery > 0) {
+    html += !lv.on_ac && lv.battery_percent >= 0 && lv.battery_percent < ka.min_battery
+      ? ` Battery at ${lv.battery_percent}%, below the <b>${ka.min_battery}%</b> minimum: closing the lid sleeps the Mac until it is plugged in.`
+      : ` On battery below ${ka.min_battery}%, closing the lid sleeps the Mac anyway.`;
   }
   if (ka.problem) html += `<div class="note warn" style="margin-top:6px">Saved but not applied on this Mac: ${esc(ka.problem)}. Click <b>Apply</b> to apply it (the machine-wide part asks for your password in a Terminal window).</div>`;
   const bl = (lv.blockers || []).filter(b => b.process !== "powerd");
@@ -6138,7 +6156,7 @@ async function grantLid(btn, noteEl) {
   if (!ka || ka.mode === "off") return;
   btn.disabled = true;
   try {
-    const x = await post("/api/keep-awake", {mode: ka.mode, idle_minutes: ka.idle_minutes || 0});
+    const x = await post("/api/keep-awake", {mode: ka.mode, idle_minutes: ka.idle_minutes || 0, min_battery: ka.min_battery ?? 50});
     note(noteEl, "ok", x.detail);
     for (let i = 0; i < 40 && x.script; i++) {
       await new Promise(r => setTimeout(r, 3000));
@@ -6156,35 +6174,48 @@ $("permLidGrant").onclick = () => grantLid($("permLidGrant"), $("permNote"));
 // which for the machine-wide part means a password prompt.
 let kaPick = null;
 const kaLabels = {off: "Off", ac: "Plugged in only", always: "Plugged in and on battery"};
+// kaMinBatt: the minimum battery on the form, a whole number 0 to 100, or
+// null when the box does not hold one.
+function kaMinBatt() {
+  const v = $("kaMinBatt").value.trim();
+  const n = Number(v);
+  return v !== "" && Number.isInteger(n) && n >= 0 && n <= 100 ? n : null;
+}
 function kaUpdateApply() {
   const ka = macState && macState.keep_awake;
   if (!ka) return;
   const sel = (document.querySelector('input[name="kaMode"]:checked') || {}).value;
   const idle = sel === "off" ? 0 : Number($("kaIdle").value);
-  const changed = sel && (sel !== ka.mode || (sel !== "off" && idle !== (ka.idle_minutes || 0)));
+  const minb = kaMinBatt(), savedMinb = ka.min_battery ?? 50;
+  const changed = sel && (sel !== ka.mode || (sel !== "off" && (idle !== (ka.idle_minutes || 0) || (minb !== null && minb !== savedMinb))));
   // Never disabled: rerunning apply is how a newer lid-awake-root.sh reaches
   // the root daemon, and it is safe to repeat.
-  $("kaApply").disabled = false;
+  $("kaApply").disabled = sel !== "off" && minb === null;
   $("kaApply").textContent = changed ? "\u2713 Apply" : "\u2713 Apply again";
-  const idleText = (mode, mins) => mode === "off" ? "" : mins ? `, for ${mins >= 60 ? mins / 60 + " h" : mins + " min"} after last use` : ", no time limit";
+  const battText = (mode, pct) => mode === "off" ? "" : pct ? `, sleeping on battery below ${pct}%` : ", no battery minimum";
+  const idleText = (mode, mins, pct) => (mode === "off" ? "" : mins ? `, for ${mins >= 60 ? mins / 60 + " h" : mins + " min"} after last use` : ", no time limit") + battText(mode, pct);
+  if (sel && sel !== "off" && minb === null) { $("kaPending").textContent = "The battery minimum must be a whole number from 0 to 100."; return; }
   // Name both sides: "now 2 h" beside a dropdown reading 1 hour looked like
   // the page disagreeing with itself.
   $("kaPending").textContent = changed
-    ? `Not applied yet. This Mac is using ${kaLabels[ka.mode] || ka.mode}${idleText(ka.mode, ka.idle_minutes)}; Apply switches it to ${kaLabels[sel] || sel}${idleText(sel, idle)}.`
+    ? `Not applied yet. This Mac is using ${kaLabels[ka.mode] || ka.mode}${idleText(ka.mode, ka.idle_minutes, savedMinb)}; Apply switches it to ${kaLabels[sel] || sel}${idleText(sel, idle, minb)}.`
     : "";
 }
 for (const r of document.querySelectorAll('input[name="kaMode"]')) {
-  r.addEventListener("change", () => { kaPick = r.value; $("kaIdle").disabled = r.value === "off"; kaUpdateApply(); });
+  r.addEventListener("change", () => { kaPick = r.value; $("kaIdle").disabled = $("kaMinBatt").disabled = r.value === "off"; kaUpdateApply(); });
 }
 $("kaIdle").addEventListener("change", () => { kaPick = kaPick || "idle"; kaUpdateApply(); });
+$("kaMinBatt").addEventListener("input", () => { kaPick = kaPick || "battery"; kaUpdateApply(); });
 $("kaApply").onclick = async () => {
   const mode = (document.querySelector('input[name="kaMode"]:checked') || {}).value;
   if (!mode) return;
-  if (mode === "always" && !confirm("Stay awake with the lid shut on battery too?\n\nThe Mac will not sleep in a bag. It keeps using the battery and can get hot.")) return;
+  const minb = kaMinBatt();
+  if (mode !== "off" && minb === null) { note($("kaNote"), "bad", "The battery minimum must be a whole number from 0 to 100."); return; }
+  if (mode === "always" && !confirm(`Stay awake with the lid shut on battery too?\n\nThe Mac will not sleep in a bag${minb ? ` until the battery is below ${minb}%` : ""}. It keeps using the battery and can get hot.`)) return;
   $("kaApply").disabled = true;
   note($("kaNote"), "warn", "Applying...");
   let viaTerminal = false;
-  try { const x = await post("/api/keep-awake", {mode, idle_minutes: mode === "off" ? 0 : Number($("kaIdle").value)}); note($("kaNote"), "ok", x.detail); kaPick = null; viaTerminal = !!x.script; }
+  try { const x = await post("/api/keep-awake", mode === "off" ? {mode, idle_minutes: 0} : {mode, idle_minutes: Number($("kaIdle").value), min_battery: minb}); note($("kaNote"), "ok", x.detail); kaPick = null; viaTerminal = !!x.script; }
   catch (e) { note($("kaNote"), "bad", e.message); }
   await loadMac();
   // The password is typed in Terminal: keep checking for two minutes, so
@@ -6949,6 +6980,52 @@ $("ntTest").onclick = async () => {
   } catch (err) { note($("ntNote"), "bad", "Could not send: " + err.message); }
   finally { $("ntTest").disabled = false; }
 };
+// Notification Center's permission, in words. The helper only reads it:
+// the prompt comes from the first notification, or the test below.
+function ntPermText(v) {
+  if (v.helper_error) return "Notification Center: " + v.helper_error + ".";
+  const say = {
+    "authorized": "Notification Center: allowed. Banner style and sounds are under System Settings, Notifications, Claude Burst.",
+    "provisional": "Notification Center: delivered quietly (straight to the list, no banner). Turn banners on under System Settings, Notifications, Claude Burst.",
+    "denied": "Notification Center: turned off for Claude Burst. macOS never asks again, so nothing is shown there until it is allowed under System Settings, Notifications, Claude Burst (claude-burst app notifications opens it there).",
+    "not-determined": "Notification Center: not asked yet. A prompt from Claude Burst asks the first time Burst sends one; Send a test notification asks now.",
+  };
+  // Nothing shows the toasts here (no usage panel, no mod: Claude Desktop
+  // only), so Notification Center takes every alert unless a level was chosen.
+  const dflt = v.notification_center_default && !v.toasts_shown ? " Nothing on this Mac shows the toasts (as with Claude Desktop), so Notification Center gets every alert by default." : "";
+  return (say[v.permission] || "Notification Center: macOS says \"" + v.permission + "\".") + dflt + (v.running ? "" : " This gateway is not posting to Notification Center (it is not running here).");
+}
+function ntShow(v) {
+  $("ntToasts").value = v.toasts;
+  $("ntNC").value = v.notification_center;
+  $("ntSave").disabled = true;
+  $("ntPerm").textContent = ntPermText(v);
+  $("ntPerm").dataset.permission = v.permission || "";
+}
+async function ntLoad() {
+  try { ntShow(await getJSON("/api/alert-channels")); }
+  catch (err) { $("ntPerm").textContent = "Could not read the alert settings: " + err.message; }
+}
+$("ntToasts").onchange = $("ntNC").onchange = () => { $("ntSave").disabled = false; };
+$("ntSave").onclick = async () => {
+  $("ntSave").disabled = true;
+  try {
+    const v = await post("/api/alert-channels", {toasts: $("ntToasts").value, notification_center: $("ntNC").value});
+    ntShow(v);
+    note($("ntNote"), "ok", "Saved. It applies to the next alert.");
+  } catch (err) { $("ntSave").disabled = false; note($("ntNote"), "bad", "Could not save: " + err.message); }
+};
+$("ntTestNC").onclick = async () => {
+  $("ntTestNC").disabled = true;
+  if ($("ntPerm").dataset.permission === "not-determined") note($("ntNote"), "warn", "macOS is asking whether Claude Burst may send notifications: answer its prompt (top right of the screen).");
+  try {
+    const r = await post("/api/alert-test-nc");
+    if (r.posted) note($("ntNote"), "ok", "Sent to Notification Center. A banner shows top right within a second; if not, check Focus and System Settings, Notifications, Claude Burst.");
+    else note($("ntNote"), "bad", "Not shown: " + (r.error || ("macOS says " + r.status)));
+  } catch (err) { note($("ntNote"), "bad", "Could not send: " + err.message); }
+  finally { $("ntTestNC").disabled = false; ntLoad(); }
+};
+ntLoad();
 $("hsSave").onclick = () => {
   const n = id => parseInt($(id).value, 10) || 0;
   const body = {hotspot: {ssid: $("hsSsid").value, when: $("hsWhen").value,

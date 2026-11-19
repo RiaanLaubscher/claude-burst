@@ -1,4 +1,4 @@
-package metrics_test
+package metrics
 
 import (
 	"bufio"
@@ -10,21 +10,33 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/andrewbakercloudscale/claude-burst/internal/metrics"
 )
 
+// The benchmark history is shaped like the real one these scans were
+// measured against on 1 Nov 2026, 162,000 events from 3,809 sessions over 14
+// days: what a scan costs is in how many events it reads and how many
+// sessions it keys.
 const (
 	benchEvents   = 170_000
 	benchSessions = 3_800
 	benchDays     = 14
 )
 
+// The history is written once for every benchmark in a run and removed by
+// TestMain when the run ends, so a run leaves nothing in the temp directory.
 var (
 	benchOnce sync.Once
 	benchPath string
 	benchErr  error
 )
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if benchPath != "" {
+		os.RemoveAll(filepath.Dir(benchPath))
+	}
+	os.Exit(code)
+}
 
 func benchHistory(b *testing.B) string {
 	b.Helper()
@@ -62,7 +74,7 @@ func writeBenchHistory(path string) error {
 	for i := range benchEvents {
 		s := rng.IntN(benchSessions)
 		secondary := rng.IntN(10) == 0
-		e := metrics.Event{
+		e := Event{
 			Time:       end.Add(-span + time.Duration(i)*step),
 			RequestID:  fmt.Sprintf("req_%016x", rng.Uint64()),
 			SessionID:  fmt.Sprintf("%08x-1111-4222-8333-%012x", s, s),
@@ -111,12 +123,12 @@ func benchRepoOf(session string) (string, string) {
 
 func BenchmarkSummarizeTotal(b *testing.B) {
 	path := benchHistory(b)
-	if _, err := metrics.Summarize(path, time.Time{}); err != nil {
+	if _, err := Summarize(path, time.Time{}); err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := metrics.Summarize(path, time.Time{}); err != nil {
+		if _, err := Summarize(path, time.Time{}); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -125,12 +137,12 @@ func BenchmarkSummarizeTotal(b *testing.B) {
 func BenchmarkSummarizeToday(b *testing.B) {
 	path := benchHistory(b)
 	since := time.Now().Add(-24 * time.Hour)
-	if _, err := metrics.Summarize(path, since); err != nil {
+	if _, err := Summarize(path, since); err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := metrics.Summarize(path, since); err != nil {
+		if _, err := Summarize(path, since); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -139,12 +151,12 @@ func BenchmarkSummarizeToday(b *testing.B) {
 func BenchmarkEfficiencySince(b *testing.B) {
 	path := benchHistory(b)
 	since := time.Now().Add(-30 * 24 * time.Hour)
-	if _, err := metrics.EfficiencySince(path, since); err != nil {
+	if _, err := EfficiencySince(path, since); err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := metrics.EfficiencySince(path, since); err != nil {
+		if _, err := EfficiencySince(path, since); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -153,12 +165,12 @@ func BenchmarkEfficiencySince(b *testing.B) {
 func BenchmarkCompactionStatsSince(b *testing.B) {
 	path := benchHistory(b)
 	since := time.Now().Add(-30 * 24 * time.Hour)
-	if _, err := metrics.CompactionStatsSince(path, since); err != nil {
+	if _, err := CompactionStatsSince(path, since); err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := metrics.CompactionStatsSince(path, since); err != nil {
+		if _, err := CompactionStatsSince(path, since); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -168,7 +180,7 @@ func BenchmarkCompactionStrategies(b *testing.B) {
 	path := benchHistory(b)
 	since := time.Now().Add(-30 * 24 * time.Hour)
 	run := func() {
-		if _, err := metrics.CompactionStrategiesTracked(path, since, 500_000, 5*time.Minute, benchRepoOf, nil); err != nil {
+		if _, err := CompactionStrategiesTracked(path, since, 500_000, 5*time.Minute, benchRepoOf, nil); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -182,13 +194,13 @@ func BenchmarkCompactionStrategies(b *testing.B) {
 func BenchmarkUsage7d(b *testing.B) {
 	path := benchHistory(b)
 	now := time.Now()
-	f := metrics.UsageFilter{
+	f := UsageFilter{
 		From:  time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local).AddDate(0, 0, -6),
 		To:    now,
 		Daily: true,
 	}
 	run := func() {
-		if _, err := metrics.Usage(path, f, func(string) string { return "proj" }); err != nil {
+		if _, err := Usage(path, f, func(string) string { return "proj" }); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -202,7 +214,7 @@ func BenchmarkUsage7d(b *testing.B) {
 func BenchmarkDaily14(b *testing.B) {
 	path := benchHistory(b)
 	run := func() {
-		if _, err := metrics.Daily(path, 14); err != nil {
+		if _, err := Daily(path, 14); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -230,12 +242,12 @@ func BenchmarkColdLoad(b *testing.B) {
 			b.Fatal(err)
 		}
 		b.StartTimer()
-		if _, err := metrics.Summarize(p, time.Time{}); err != nil {
+		if _, err := Summarize(p, time.Time{}); err != nil {
 			b.Fatal(err)
 		}
 		b.StopTimer()
 		os.Remove(p)
-		if _, err := metrics.Summarize(p, time.Time{}); err != nil {
+		if _, err := Summarize(p, time.Time{}); err != nil {
 			b.Fatal(err)
 		}
 		b.StartTimer()

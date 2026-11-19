@@ -30,6 +30,12 @@ const (
 	// Temp groups scratch sessions under the temp directory: each has its
 	// own directory and none is a project anyone would look for.
 	Temp = "(temporary directories)"
+	// DesktopScratch groups Claude Desktop's Code sessions started without
+	// a folder: Desktop makes one per session under
+	// ~/Library/Application Support/Claude/scratch-workspaces, named like
+	// "scratch-2026-11-17-cae9f8", so each would otherwise be a repository
+	// of its own in spend by repository (seen 17 Nov 2026).
+	DesktopScratch = "(Claude Desktop scratch)"
 )
 
 // missTTL is how long a session with no transcript is remembered as
@@ -58,7 +64,9 @@ type Resolver struct {
 	miss map[string]missed    // session -> when it was last not found
 	dir  string               // Claude Code's projects directory
 	temp []string             // scratch roots
-	now  func() time.Time
+	// desktop are Claude Desktop's scratch roots (DesktopScratch).
+	desktop []string
+	now     func() time.Time
 }
 
 // New resolves against Claude Code's projects directory
@@ -69,8 +77,18 @@ func New() *Resolver {
 		home, _ := os.UserHomeDir()
 		base = filepath.Join(home, ".claude")
 	}
+	home, _ := os.UserHomeDir()
 	return NewWith(filepath.Join(base, "projects"),
-		[]string{"/private/tmp/", "/tmp/", strings.TrimSuffix(os.TempDir(), "/") + "/"})
+		[]string{"/private/tmp/", "/tmp/", strings.TrimSuffix(os.TempDir(), "/") + "/"}).
+		WithDesktopScratch(filepath.Join(home, "Library", "Application Support", "Claude", "scratch-workspaces"))
+}
+
+// WithDesktopScratch groups sessions under root as DesktopScratch.
+func (r *Resolver) WithDesktopScratch(root string) *Resolver {
+	if root != "" {
+		r.desktop = append(r.desktop, strings.TrimSuffix(root, "/")+"/")
+	}
+	return r
 }
 
 // NewWith resolves against projectsDir, grouping directories under any of
@@ -116,6 +134,14 @@ func (r *Resolver) Resolve(session string) (name, root string) {
 	return name, root
 }
 
+// transcriptPath is session's transcript in the first project directory, by
+// name, that has one, or "" when none does. It asks each project directory
+// for the one file. filepath.Glob(dir/*/session.jsonl) found the same file
+// by reading every project directory's whole listing: with 3,776
+// transcripts in 32 project directories a lookup made 4,375 allocations and
+// took 2.4ms, where this makes 207 and takes 0.12ms (BenchmarkResolveMiss).
+// os.ReadDir sorts by name as Glob did, so two directories holding the same
+// session still give the first one.
 func (r *Resolver) transcriptPath(session string) string {
 	ents, err := os.ReadDir(r.dir)
 	if err != nil {
@@ -133,10 +159,10 @@ func (r *Resolver) transcriptPath(session string) string {
 
 // plainID reports whether a session id can be a transcript's file name. The
 // id is a request header, so it is whatever the sender chose, and Resolve
-// puts it in a glob: "../../x" walked out of the projects directory and
-// "*" matched every session's transcript. Claude Code's ids are UUIDs;
-// letters, digits, "-" and "_" cover them and nothing a path or a pattern
-// is made of.
+// puts it in a path: "../../x" walked out of the projects directory and,
+// while the path was a glob, "*" matched every session's transcript. Claude
+// Code's ids are UUIDs; letters, digits, "-" and "_" cover them and nothing
+// a path or a pattern is made of.
 func plainID(s string) bool {
 	if s == "" || len(s) > 128 {
 		return false
@@ -182,10 +208,24 @@ func (r *Resolver) repoOf(dir string) (name, root string) {
 			return Temp, ""
 		}
 	}
+	for _, t := range r.desktop {
+		if strings.HasPrefix(dir, t) {
+			return DesktopScratch, ""
+		}
+	}
 	for d := dir; ; d = filepath.Dir(d) {
 		_, err := stat(filepath.Join(d, ".git"))
 		observe(d, err)
 		if err == nil {
+			if main, ok := worktreeOwner(d); ok {
+				// A worktree Claude Code made (Claude Desktop makes one
+				// for most Code sessions, the CLI with --worktree) is
+				// named after its folder, "eager-turing-a1b2", which
+				// says nothing; the repository it belongs to does, and
+				// its per-repository Compact at should apply.
+				noteRepo(main)
+				return filepath.Base(main), main
+			}
 			noteRepo(d)
 			return filepath.Base(d), d
 		}
@@ -194,6 +234,19 @@ func (r *Resolver) repoOf(dir string) (name, root string) {
 		}
 	}
 	return filepath.Base(dir), dir
+}
+
+// worktreeOwner is the repository a Claude Code worktree belongs to:
+// <repo>/.claude/worktrees/<name> is where both Claude Desktop and the CLI
+// put them.
+func worktreeOwner(d string) (string, bool) {
+	sep := string(filepath.Separator)
+	mark := sep + ".claude" + sep + "worktrees" + sep
+	i := strings.LastIndex(d, mark)
+	if i <= 0 || strings.Contains(d[i+len(mark):], sep) || d[i+len(mark):] == "" {
+		return "", false
+	}
+	return d[:i], true
 }
 
 // RepoOf names the repository holding the folder dir, as Resolve does for

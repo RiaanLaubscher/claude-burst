@@ -82,7 +82,7 @@ func watchdogHome(t *testing.T) (home string, run func(env ...string)) {
 		}
 	}
 	stubs := map[string]string{
-		"launchctl": "#!/bin/sh\np=$(cat " + filepath.Join(home, "pid") + " 2>/dev/null)\n[ -n \"$p\" ] && echo \"\tpid = $p\"\nexit 0\n",
+		"launchctl": "#!/bin/sh\necho \"$1\" >> " + filepath.Join(home, "launchctl-calls") + "\np=$(cat " + filepath.Join(home, "pid") + " 2>/dev/null)\n[ -n \"$p\" ] && echo \"\tpid = $p\"\nexit 0\n",
 		"curl":      "#!/bin/sh\nexit 0\n",
 		"osascript": "#!/bin/sh\necho \"$@\" >> " + filepath.Join(home, "notified") + "\n",
 		"fakekill":  "#!/bin/sh\nexit 0\n",
@@ -194,6 +194,30 @@ func TestSelfHealDoesNotCountPlannedRestarts(t *testing.T) {
 
 // What the watchdog does to the gateway is in the audit trail, not only in
 // a log file: here, killing one that stopped answering.
+// 2026-11-16 09:55: an install booted the gateway out and, one second later,
+// the watchdog found it gone and loaded the plist itself, so every bootstrap
+// of the install was refused and it stopped halfway. While an install's
+// reload is live (a fresh planned-restart), the watchdog leaves it alone;
+// without one, a gateway that is gone is reloaded as before.
+func TestSelfHealLeavesAnInstallsReloadAlone(t *testing.T) {
+	home, run := watchdogHome(t)
+	calls := filepath.Join(home, "launchctl-calls")
+	planned := filepath.Join(home, ".config", "claude-burst", "planned-restart")
+	if err := os.WriteFile(planned, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run()
+	if got := readFile(calls); strings.Contains(got, "kickstart") || strings.Contains(got, "bootstrap") {
+		t.Fatalf("reloaded the gateway in the middle of an install's reload: %q", got)
+	}
+	os.Remove(planned)
+	os.Remove(calls)
+	run()
+	if got := readFile(calls); !strings.Contains(got, "kickstart") {
+		t.Fatalf("a gateway that is gone with no reload in progress must be reloaded: %q", got)
+	}
+}
+
 func TestSelfHealAuditsTheKill(t *testing.T) {
 	home, run := watchdogHome(t)
 	if err := os.WriteFile(filepath.Join(home, "pid"), []byte("4242"), 0o600); err != nil {
@@ -250,5 +274,30 @@ func TestRollbackRecordsHowItEnded(t *testing.T) {
 		if strings.Count(got, "Script: rollback.sh") != 2 || !strings.Contains(got, want) {
 			t.Errorf("exit %s under zsh and bash: audit is\n%s\nwant two entries containing %s", code, got, want)
 		}
+	}
+}
+
+// A healthy run, every 30 seconds all day, asks launchd once and never starts
+// python3: on 18 Nov 2026 the watchdog was about 2 process starts a second.
+func TestSelfHealHealthyRunIsCheap(t *testing.T) {
+	home, run := watchdogHome(t)
+	bin := filepath.Join(home, "bin")
+	os.WriteFile(filepath.Join(home, "pid"), []byte("4242"), 0o644)
+	os.WriteFile(filepath.Join(bin, "curl"), []byte("#!/bin/sh\necho '{\"ok\":true,\"mode\":\"transparent\"}'\n"), 0o755)
+	launchctl := "#!/bin/sh\necho \"$1\" >> " + filepath.Join(home, "launchctl-calls") + "\necho '\tpid = 4242'\n"
+	os.WriteFile(filepath.Join(bin, "launchctl"), []byte(launchctl), 0o755)
+	for _, name := range []string{"python3", "date", "stat", "cat"} {
+		os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\necho "+name+" >> "+filepath.Join(home, "started")+"\n"), 0o755)
+	}
+	run()
+	run()
+	if got := readFile(filepath.Join(home, "started")); got != "" {
+		t.Errorf("healthy runs started %q, want none of python3, date, stat, cat", got)
+	}
+	if n := strings.Count(readFile(filepath.Join(home, "launchctl-calls")), "print"); n != 2 {
+		t.Errorf("launchctl print %d times in two runs, want 2", n)
+	}
+	if got := readFile(filepath.Join(home, ".config", "claude-burst", "self-heal-pid")); strings.TrimSpace(got) != "4242" {
+		t.Errorf("pid file %q, want 4242", got)
 	}
 }

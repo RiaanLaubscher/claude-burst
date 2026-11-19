@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/andrewbakercloudscale/claude-burst/internal/alerting"
 	"github.com/andrewbakercloudscale/claude-burst/internal/config"
 	"github.com/andrewbakercloudscale/claude-burst/internal/launcher"
 )
@@ -61,6 +64,7 @@ func appCmd(args []string) {
 			fatal(err)
 		}
 		fmt.Printf("%s: installed. Cmd-Space, type \"burst\", Return opens the dashboard; drag it to the Dock to keep it there.\n", app)
+		installNotifier(home)
 	case len(args) == 1 && args[0] == "remove":
 		removed, err := launcher.Remove(home)
 		if err != nil {
@@ -71,8 +75,46 @@ func appCmd(args []string) {
 		} else {
 			fmt.Printf("%s: not there, or not made by Claude Burst; nothing removed\n", launcher.Path(home))
 		}
+	case len(args) == 1 && args[0] == "notifications":
+		// After "denied" macOS never asks again: System Settings is the
+		// only way back, so this opens it at Claude Burst.
+		if err := alerting.OpenSettings(); err != nil {
+			fatal(fmt.Errorf("could not open System Settings: %w; open it at Notifications, Claude Burst", err))
+		}
+		fmt.Println("System Settings is open at Notifications, Claude Burst: turn on Allow notifications.")
 	default:
-		fmt.Fprintln(os.Stderr, "usage: claude-burst app install|remove")
+		fmt.Fprintln(os.Stderr, "usage: claude-burst app install|remove|notifications")
 		os.Exit(2)
+	}
+}
+
+// installNotifier builds the Notification Center helper inside the app when
+// it changed (deploy.sh and install.sh run app install every time), and has
+// macOS ask for permission if it never has. A failure is a warning: the
+// toasts still work, and the dashboard's Notifications section says the
+// helper is missing.
+func installNotifier(home string) {
+	what, err := launcher.InstallNotifier(home)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: the Notification Center helper was not built (%v); alerts still show as toasts. Retry: claude-burst app install\n", err)
+		return
+	}
+	fmt.Printf("%s: %s\n", launcher.NotifierPath(home), what)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	st, err := alerting.AskIfUnasked(ctx)
+	switch {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "WARNING: could not ask the Notification Center helper for its permission: %v\n", err)
+	case st == "not-determined":
+		fmt.Println("Notification Center: a prompt from Claude Burst asks whether it may send notifications; choose Allow.")
+	case st == "denied":
+		// Installs before 17 Nov 2026 asked from a background process,
+		// which macOS answered "denied" without showing a prompt; it never
+		// asks again, so say where to turn it on.
+		fmt.Println("Notification Center: turned off for Claude Burst. Alerts reach you there only once it is allowed:")
+		fmt.Println("    claude-burst app notifications    (opens System Settings, Notifications, Claude Burst)")
+	default:
+		fmt.Printf("Notification Center: %s\n", st)
 	}
 }

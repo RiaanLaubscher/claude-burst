@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/andrewbakercloudscale/claude-burst/internal/admin"
+	"github.com/andrewbakercloudscale/claude-burst/internal/alerting"
 	"github.com/andrewbakercloudscale/claude-burst/internal/config"
 	"github.com/andrewbakercloudscale/claude-burst/internal/hotspot"
 	"github.com/andrewbakercloudscale/claude-burst/internal/logline"
@@ -195,7 +196,9 @@ func serve(args []string) {
 	}
 	logger.Printf("claude-burst %s bound %s (%s) in %s -- accepting connections now", version, cfg.Listen, scheme, time.Since(bindStart))
 	if dir, err := config.ConfigDir(); err == nil {
-		notice.SetDefault(notice.New(notice.Path(dir), logger))
+		pub := notice.New(notice.Path(dir), logger)
+		alerting.SetDefault(routeAlerts(pub, true, logger))
+		notice.SetDefault(pub)
 		for _, p := range problems {
 			notice.Publish("startup", notice.Warn, p.Title, p.Detail)
 		}
@@ -357,6 +360,14 @@ func startableConfig(cfg config.Config, loadErr error) (config.Config, []router.
 			Detail: fmt.Sprintf("keep_awake_idle_minutes must be 0 to %d, got %d. Running as if it were %d until config.json is corrected and the gateway restarted.", config.MaxKeepAwakeIdleMinutes, n, def),
 		})
 		cfg.KeepAwakeIdleMinutes = def
+	}
+	if n := cfg.KeepAwakeMinBatteryPercent(); n < 0 || n > config.MaxKeepAwakeMinBattery {
+		def := config.DefaultKeepAwakeMinBattery
+		found = append(found, router.StartupProblem{
+			Title:  "The keep-awake minimum battery was ignored",
+			Detail: fmt.Sprintf("keep_awake_min_battery must be 0 to %d, got %d. Running as if it were %d until config.json is corrected and the gateway restarted.", config.MaxKeepAwakeMinBattery, n, def),
+		})
+		cfg.KeepAwakeMinBattery = nil
 	}
 	return cfg, found, len(found) > 0
 }
