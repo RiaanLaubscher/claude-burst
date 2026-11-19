@@ -253,7 +253,10 @@ if [[ -x "$TARGET" ]] && { [[ "$(cat "$SHA_FILE" 2>/dev/null)" == "$BUILD_SHA" ]
   # burst-off is a copy of rollback.sh: refresh it with every deploy.
   zsh "$ROOT/scripts/install-burst-off.sh"
   # The Claude Burst app (Spotlight, Dock) runs the installed binary: write
-  # it on a Mac that predates it. Never fails the deploy.
+  # it on a Mac that predates it. The same command rebuilds and signs the
+  # Notification Center helper nested in it when the helper's source or the
+  # signing identity changed, and leaves it alone otherwise. Never fails the
+  # deploy.
   "$TARGET" app install >/dev/null || log "WARNING: the Claude Burst app was not installed; run: claude-burst app install"
   # The support console runs the installed binary: restart it on the new one
   # (and install it on a Mac that predates it). Never fails the deploy.
@@ -322,6 +325,20 @@ printf '%s\n' "$BUILD_SHA" > "$SHA_FILE"
 chmod 755 "$TARGET"
 log "installed new binary at $TARGET"
 
+# The watchdog runs a copy of its scripts, made when it was installed, so a
+# deploy that changed them shipped nothing to it: v0.20.55's fix for the
+# install racing it reached the release but not the running watchdog.
+wd_dir="$HOME/.local/bin/claude-burst-selfheal"
+if [[ -d "$wd_dir" ]]; then
+  for f in self-heal-watchdog.sh health-diagnostics.sh audit-add.sh; do
+    if ! cmp -s "$ROOT/scripts/$f" "$wd_dir/$f"; then
+      log "the self-heal watchdog runs an older $f: reinstalling it"
+      "$ROOT/scripts/install-selfheal-watchdog.sh" >/dev/null || log "WARNING: reinstalling the self-heal watchdog failed: run scripts/install-selfheal-watchdog.sh"
+      break
+    fi
+  done
+fi
+
 # --- 5. Restart and verify ---
 # Deploying restarts the gateway, which is the same deliberate "I want this
 # running" that rollback.sh's marker denies. Leaving the marker would bring the
@@ -368,7 +385,10 @@ if wait_healthy; then
   # burst-off is a copy of rollback.sh: refresh it with every deploy.
   zsh "$ROOT/scripts/install-burst-off.sh"
   # The Claude Burst app (Spotlight, Dock) runs the installed binary: write
-  # it on a Mac that predates it. Never fails the deploy.
+  # it on a Mac that predates it. The same command rebuilds and signs the
+  # Notification Center helper nested in it when the helper's source or the
+  # signing identity changed, and leaves it alone otherwise. Never fails the
+  # deploy.
   "$TARGET" app install >/dev/null || log "WARNING: the Claude Burst app was not installed; run: claude-burst app install"
   # The support console runs the installed binary: restart it on the new one
   # (and install it on a Mac that predates it). Never fails the deploy.

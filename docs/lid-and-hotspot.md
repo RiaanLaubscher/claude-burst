@@ -44,16 +44,19 @@ Off by default. `keep_awake_lid_closed` in `config.json` keeps a Claude Code ses
 | `keep_awake_lid_closed_power` | Lid shut, plugged in | Lid shut, on battery |
 | --- | --- | --- |
 | `ac` **(default)** | stays awake | sleeps as normal |
-| `always` | stays awake | stays awake |
+| `always` | stays awake | stays awake (until the battery drops below the minimum, 50% by default) |
 
 **Only while in use** (`keep_awake_idle_minutes`, 0 by default): either mode can be limited to a set time after you last used it, so a session you walked away from does not keep a closed laptop awake all night. "Used" is a Claude Code turn (from the Mac or from your phone through Remote Control) or the lid being open. Once the time passes, closing the lid sleeps the Mac as usual; opening it wakes the Mac, starts the time again, and tries the hotspot at once if there is no network. The dashboard offers 30 minutes to 8 hours and shows until when the Mac stays awake. The gateway touches `~/.config/claude-burst/last-activity` on each turn, and the root daemon, which checks every minute, reads only that file's time and only at that path.
+
+**Minimum battery** (`keep_awake_min_battery`, 50 by default): on battery below this charge, the Mac sleeps with the lid shut as usual whatever the mode and time limit say, so a laptop kept awake in a bag does not run itself flat. Plugged in, the charge does not matter. 0 turns the check off. The daemon reads the charge from the same `pmset -g batt` it reads the power source from, on each power-source change and once a minute, and logs each crossing ("battery 42% below 50%: lid-close sleep allowed"). In mode `ac` it changes nothing, since the Mac already sleeps on battery. On the dashboard it is the "Sleep anyway on battery below" box under the time limit.
 
 ```bash
 claude-burst configure --keep-awake-lid-closed true                 # mode ac
 claude-burst configure --keep-awake-idle-minutes 60                 # awake for an hour after last use
+claude-burst configure --keep-awake-min-battery 30                  # sleep anyway on battery below 30% (0 = no check)
 claude-burst configure --keep-awake-power always                    # switch mode
 claude-burst configure --keep-awake-lid-closed false                # undo
-sudo scripts/lid-awake-root.sh apply ac                             # printed for you if sudo is not cached; ./install.sh re-applies it from config.json
+sudo scripts/lid-awake-root.sh apply ac 0 ~/.config/claude-burst/last-activity --min-battery 50   # printed for you if sudo is not cached; ./install.sh re-applies it from config.json
 ```
 
 - **`pmset -a disablesleep 1`** (root), the only switch that overrides clamshell sleep; `caffeinate` and `pmset sleep 0` do not. The prior value is recorded and restored by `remove`.
@@ -69,6 +72,7 @@ With `always`, a closed laptop never sleeps: on battery in a bag that means heat
 
 ```text
 keep awake lid closed: on, mode ac (now on AC: SleepDisabled on, Ghostty App Nap disabled on)
+  minimum battery: 50%, a shut lid sleeps the Mac on battery below it
 ```
 
 Any line starting `->` beneath it is drift, with the command that fixes it.
@@ -111,4 +115,8 @@ The gateway looks every 5 seconds for the two things that cause it: the clock ha
 
 Burst's notifications are the pop-ups the usage panel floats over Claude Code's Ghostty window, in the same style as its loading notice: failover to the secondary and back, limits, failures, the network, guards repairing the redirect, compaction and the rest listed under [Dashboard](dashboard.md). Each stays at least 10 seconds while Ghostty is in front (warnings 15, errors until they clear); the clock stops while another app is in front. Switch them on or off under **Session options, Show gateway alerts on screen**, and use **Send a test alert** to see one.
 
-Burst no longer sends macOS notifications. They came from Script Editor, which macOS drops silently until it has been allowed to notify, so they looked broken for most people.
+Burst can also post to macOS Notification Center, which reaches you in any app, not only over Ghostty. Under **Notifications** on the dashboard, each of the two (on-screen toasts and Notification Center) is set to Off, Critical only or All alerts; by default the toasts get every alert and Notification Center gets the critical ones. Where nothing on the Mac shows the toasts (no usage panel, no mod, no toast shown in two weeks: someone who uses Claude Code only through [Claude Desktop](claude-desktop.md)), Notification Center's default is All alerts instead, since it is the only place an alert can be seen; a level you choose is kept either way. Critical is any error, plus Burst bypassed, requests failing, the network down, the pf guard's alerts, a broken redirect or certificate, and a compaction that failed; the all-clear that ends one goes wherever the problem went. The setting is `alerts` in config.json and applies to the next alert.
+
+The banners come from a small notifier app nested in the Claude Burst app (`Contents/Helpers/Claude Burst Notifier.app`, bundle id `ninja.andrewbaker.claude-burst.notifier`), built and signed by `claude-burst app install`, which the installer and every deploy run. macOS lists it as Claude Burst under System Settings, Notifications, and asks once whether it may notify: when it is installed, the first time a notification is sent, or when you press **Send a test notification**. The prompt comes from the notifier started as an app through LaunchServices (`open -n`), at the front of the screen. Until 17 Nov 2026 the install asked from a background child process instead, and macOS answered "denied" for the person without showing any prompt. A denial is final: macOS never asks again. If the dashboard says Notification Center is turned off, `claude-burst app notifications` opens System Settings at Notifications, Claude Burst, where **Allow notifications** turns it on. The dashboard shows whether it is allowed. The gateway posts its own alerts; alerts written while the gateway is down (the pf guard's) are posted by the support console, which follows the audit trail.
+
+Until 3 Oct 2026 Burst posted macOS notifications through osascript. macOS filed those under Script Editor and dropped them silently until Script Editor had been allowed to notify, so they looked broken for most people; the notifier app replaced them.

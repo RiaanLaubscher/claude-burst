@@ -157,3 +157,108 @@ func TestApplySaysWhetherTheScreenIsOff(t *testing.T) {
 		}
 	}
 }
+
+// screenSteps feeds lid readings through the daemon's screen_step, with stub
+// ioreg, pmset and system_profiler on PATH that only record being called.
+func screenSteps(t *testing.T, events, sleepDisabled, displays string) (out, calls string) {
+	t.Helper()
+	stubs := t.TempDir()
+	record := filepath.Join(stubs, "calls")
+	for _, name := range []string{"ioreg", "pmset", "system_profiler", "sleep"} {
+		os.WriteFile(filepath.Join(stubs, name), []byte("#!/bin/sh\necho "+name+" >> "+record+"\n"), 0o755)
+	}
+	cmd := exec.Command("zsh", "../../scripts/lid-awake-root.sh", "screen-steps")
+	cmd.Env = append(os.Environ(), "PATH="+stubs+":"+os.Getenv("PATH"),
+		"CLAUDE_BURST_ROOT_STATE_DIR="+t.TempDir(), "CLAUDE_BURST_TEST_LID_EVENTS="+events,
+		"CLAUDE_BURST_TEST_SLEEPDISABLED="+sleepDisabled, "CLAUDE_BURST_TEST_DISPLAYS="+displays)
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("screen-steps: %v: %s", err, b)
+	}
+	c, _ := os.ReadFile(record)
+	return strings.TrimSpace(string(b)), strings.TrimSpace(string(c))
+}
+
+// With the lid open the watcher's readings start no process at all: the old
+// loop ran an ioreg and a sleep every second, all day.
+func TestLidOpenStartsNoProcess(t *testing.T) {
+	out, calls := screenSteps(t, strings.Repeat("open\n", 20), "1", builtInOnly)
+	if out != "" || calls != "" {
+		t.Errorf("lid open: want nothing run, got output %q, calls %q", out, calls)
+	}
+}
+
+// Shut with nothing external: the screen goes dark at once and is not asked
+// again every second; a monitor connected means it is left alone.
+func TestLidShutDarkensOnceAndDecidesRarely(t *testing.T) {
+	out, calls := screenSteps(t, "open\nshut\nshut\nshut\nshut\nopen", "1", builtInOnly)
+	if out != "displaysleepnow" {
+		t.Errorf("shut for a moment: want one displaysleepnow, got %q", out)
+	}
+	if strings.Contains(calls, "ioreg") || strings.Contains(calls, "sleep") {
+		t.Errorf("shut: want no ioreg or sleep, got calls %q", calls)
+	}
+	out, _ = screenSteps(t, "open\nshut\nshut\nshut", "1", withMonitor)
+	if out != "" {
+		t.Errorf("shut with a monitor: want the screen left alone, got %q", out)
+	}
+}
+
+// desiredBatt runs the root script's no-root "desired" check with the lid
+// open (in use), a minimum battery file (none when min is ""), and
+// pmset -g batt output given through CLAUDE_BURST_TEST_BATT.
+func desiredBatt(t *testing.T, mode, min, batt string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if min != "" {
+		os.WriteFile(filepath.Join(dir, "lid-awake.minbattery"), []byte(min+"\n"), 0o644)
+	}
+	cmd := exec.Command("zsh", "../../scripts/lid-awake-root.sh", "desired", mode)
+	cmd.Env = append(os.Environ(), "CLAUDE_BURST_ROOT_STATE_DIR="+dir, "CLAUDE_BURST_TEST_LID=open", "CLAUDE_BURST_TEST_BATT="+batt)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("desired: %v: %s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func battAt(source, pct string) string {
+	return "Now drawing from '" + source + "'\n -InternalBattery-0 (id=1)\t" + pct + "%; discharging; 3:10 remaining present: true\n"
+}
+
+// The minimum battery: on battery below it a shut lid sleeps the Mac, in
+// mode always too; at or above it, on mains power, or with the minimum 0
+// (or a daemon applied before it existed), nothing changes.
+func TestMinimumBattery(t *testing.T) {
+	cases := []struct{ name, mode, min, batt, want string }{
+		{"battery below the minimum", "always", "50", battAt("Battery Power", "42"), "0"},
+		{"battery at the minimum", "always", "50", battAt("Battery Power", "50"), "1"},
+		{"battery above the minimum", "always", "50", battAt("Battery Power", "51"), "1"},
+		{"on AC with a low charge", "always", "50", battAt("AC Power", "10"), "1"},
+		{"on AC with a low charge, mode ac", "ac", "50", battAt("AC Power", "10"), "1"},
+		{"minimum 0: no check", "always", "0", battAt("Battery Power", "5"), "1"},
+		{"no minimum file: no check", "always", "", battAt("Battery Power", "5"), "1"},
+		{"mode ac on battery above the minimum: sleeps anyway", "ac", "50", battAt("Battery Power", "90"), "0"},
+		{"no battery at all", "always", "50", "Now drawing from 'AC Power'\n", "1"},
+		{"garbage minimum ignored", "always", "abc", battAt("Battery Power", "5"), "1"},
+	}
+	for _, c := range cases {
+		if got := desiredBatt(t, c.mode, c.min, c.batt); got != c.want {
+			t.Errorf("%s: got %s, want %s", c.name, got, c.want)
+		}
+	}
+}
+
+// status names the minimum and what it is doing now.
+func TestStatusNamesTheMinimumBattery(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "lid-awake.minbattery"), []byte("50\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "lid-awake.mode"), []byte("always\n"), 0o644)
+	cmd := exec.Command("zsh", "../../scripts/lid-awake-root.sh", "status")
+	cmd.Env = append(os.Environ(), "CLAUDE_BURST_ROOT_STATE_DIR="+dir, "CLAUDE_BURST_TEST_LID=open",
+		"CLAUDE_BURST_TEST_BATT="+battAt("Battery Power", "42"))
+	out, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "minimum battery: 50% (now 42% on battery, below it: lid-close sleep allowed)") {
+		t.Errorf("status: %s", out)
+	}
+}

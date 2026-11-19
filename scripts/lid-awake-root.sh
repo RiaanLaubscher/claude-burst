@@ -30,6 +30,12 @@
 # wakes the Mac and starts a new window. With a window set, the daemon runs in
 # both modes and checks every minute as well as on power-source changes.
 #
+# A minimum battery charge (default 50%) overrides both: on battery below it,
+# SleepDisabled goes to 0 and a shut lid sleeps the Mac as usual, so a laptop
+# kept awake in a bag does not run itself flat. 0 turns the check off. The
+# charge is read from the same `pmset -g batt` call as the power source, on
+# each power-source event and on the minute check, never per second.
+#
 # The screen: with SleepDisabled the built-in screen stays lit behind the
 # shut lid (seen 2026-09-30), using power and warming the lid for nobody.
 # While the lid is shut and SleepDisabled is 1, the daemon turns the display
@@ -49,13 +55,15 @@
 # somebody set for their own reasons. Everything is idempotent.
 #
 # Usage:
-#   sudo lid-awake-root.sh apply [ac|always] [IDLE_MINUTES ACTIVITY_FILE]
+#   sudo lid-awake-root.sh apply [ac|always] [IDLE_MINUTES ACTIVITY_FILE] [--min-battery PERCENT]
+#        (--min-battery may come anywhere after apply; left out, it is 50)
 #   sudo lid-awake-root.sh remove
 #        lid-awake-root.sh status                # no root
 #        lid-awake-root.sh desired [ac|always]   # no root; what reconcile would set now
 #        lid-awake-root.sh screen                # no root; "off" or "leave": what the screen check would do
 #   (daemon only) reconcile | watch
 set -uo pipefail
+zmodload zsh/datetime zsh/zselect   # EPOCHSECONDS and a sleep that starts no process
 
 SELF="$0"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -65,6 +73,9 @@ MODE_FILE="$STATE_DIR/lid-awake.mode"     # ac | always
 IDLE_FILE="$STATE_DIR/lid-awake.idle"     # minutes; absent or 0 = no window
 ACT_FILE="$STATE_DIR/lid-awake.activity"  # path of the gateway's activity file
 LIDOPEN_FILE="$STATE_DIR/lid-awake.lidopen" # touched while the lid is open
+MINBATT_FILE="$STATE_DIR/lid-awake.minbattery" # percent; absent or 0 = no check
+LOWBATT_FILE="$STATE_DIR/lid-awake.lowbatt" # exists while sleep is allowed for low battery
+DEFAULT_MIN_BATTERY=50
 LABEL="ninja.andrewbaker.claude-burst-lidawake"
 PLIST="/Library/LaunchDaemons/$LABEL.plist"
 LIBEXEC="/usr/local/libexec/claude-burst"
@@ -75,7 +86,7 @@ INSTALL_BIN=/usr/bin/install
 
 die() { echo "error: $*" >&2; exit 1; }
 need_root() { [[ $EUID -eq 0 ]] || die "must run as root: sudo $SELF $1"; }
-log() { print -r -- "$(date '+%Y-%m-%d %H:%M:%S %z') $*" >> "$LOG" 2>/dev/null; }
+log() { { print -r -- "$(date '+%Y-%m-%d %H:%M:%S %z') $*" >> "$LOG"; } 2>/dev/null; }
 
 # pmset -g prints "SleepDisabled\t\t0|1" under "System-wide power settings".
 current() { pmset -g | awk '$1 == "SleepDisabled" { print $2; exit }'; }
@@ -84,9 +95,30 @@ current() { pmset -g | awk '$1 == "SleepDisabled" { print $2; exit }'; }
 # Read whole, then matched: under pipefail, `pmset ... | head -1` or
 # `| grep -q` can kill the writer with SIGPIPE and fail the pipeline, which
 # reads as "no match" whatever the output said (see lid_closed).
-power_source() {
-  local b; b="$(pmset -g batt 2>/dev/null)"
-  if [[ "${b%%$'\n'*}" == *"'Battery Power'"* ]]; then echo battery; else echo ac; fi
+# read_batt sets POWER (ac|battery) and BATT_PCT (the charge, or "" with no
+# battery) from one `pmset -g batt`, parsed in the shell.
+# CLAUDE_BURST_TEST_BATT (pmset -g batt shaped text) is for the tests only.
+POWER=ac; BATT_PCT=""
+read_batt() {
+  local b
+  if [[ -n "${CLAUDE_BURST_TEST_BATT:-}" ]]; then b="$CLAUDE_BURST_TEST_BATT"; else b="$(pmset -g batt 2>/dev/null)"; fi
+  if [[ "${b%%$'\n'*}" == *"'Battery Power'"* ]]; then POWER=battery; else POWER=ac; fi
+  BATT_PCT=""
+  if [[ "$b" =~ '([0-9]+)%;' ]]; then BATT_PCT="$match[1]"; fi
+}
+power_source() { read_batt; echo "$POWER"; }
+
+valid_minbatt() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 <= 100 )); }
+
+# min_battery: the applied minimum, 0 when unset or unreadable.
+min_battery() {
+  local m=""; { m="$(<"$MINBATT_FILE")"; } 2>/dev/null
+  valid_minbatt "$m" && echo "$m" || echo 0
+}
+
+# low_battery: on battery below the minimum, per the last read_batt.
+low_battery() { # min
+  [[ "$POWER" == battery && -n "$BATT_PCT" ]] && (( $1 > 0 && BATT_PCT < $1 ))
 }
 
 valid_mode() { [[ "$1" == ac || "$1" == always ]]; }
@@ -95,9 +127,10 @@ valid_idle() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 <= 1440 )); }
 # Only the gateway's own file under a user's home; read for its mtime only.
 valid_activity() { [[ "$1" =~ ^/Users/[A-Za-z0-9._-]+/\.config/claude-burst/last-activity$ ]]; }
 
+LID_NOW=""   # shut|open as the watcher last read it; saves an ioreg per check
 lid_closed() {
   # CLAUDE_BURST_TEST_LID (shut|open) is for the tests only; launchd never sets it.
-  case "${CLAUDE_BURST_TEST_LID:-}" in shut) return 0 ;; open) return 1 ;; esac
+  case "${LID_NOW:-${CLAUDE_BURST_TEST_LID:-}}" in shut) return 0 ;; open) return 1 ;; esac
   # Captured, never piped into grep -q: with pipefail, grep stopping at the
   # match killed ioreg mid-write and the pipeline failed, so a shut lid read
   # as open. On 3 Oct 2026 ten of ten checks said open with the lid shut, and
@@ -122,8 +155,18 @@ in_use() {
   (( $(date +%s) - last < idle * 60 ))
 }
 
+# compute_desired sets DESIRED (0|1) for a mode, with MIN and LOW (1 when
+# on battery below the minimum) beside it, in the current shell.
+DESIRED=0; MIN=0; LOW=0
+compute_desired() { # mode
+  read_batt
+  MIN="$(min_battery)"
+  if low_battery "$MIN"; then LOW=1; else LOW=0; fi
+  if (( LOW == 0 )) && [[ "$1" == always || "$POWER" == ac ]] && in_use; then DESIRED=1; else DESIRED=0; fi
+}
+
 desired_for() { # mode -> 0|1
-  if [[ "$1" == always || "$(power_source)" == ac ]] && in_use; then echo 1; else echo 0; fi
+  compute_desired "$1"; echo "$DESIRED"
 }
 
 # Always: the screen check below runs in every mode.
@@ -150,28 +193,88 @@ screen_decision() {
 
 DARK_FILE="$STATE_DIR/lid-awake.dark"   # exists while the screen is off for this closing
 LID_SEEN=""   # the lid as the last check saw it, so each change is logged once
-screen_check() {
+DECISION=""; DECIDED_AT=0; DARKENED_AT=0
+DECIDE_EVERY=30   # seconds between fresh screen decisions while the lid stays shut
+DARKEN_EVERY=2    # seconds between displaysleepnow calls while it should be dark
+
+# lid_events: one long-lived osascript reads AppleClamshellState straight from
+# IOKit once a second and prints "shut" or "open": on every change, and every
+# second while shut. Asking ioreg each second cost two process starts a second
+# all day (an ioreg and a sleep), about 15 a second as System Sentinel counts
+# them on 17 Nov 2026; this starts none. Its memory levels off at about 39 MB.
+# CLAUDE_BURST_TEST_LID_EVENTS (lines of shut|open) is for the tests only.
+lid_events() {
+  if [[ -n "${CLAUDE_BURST_TEST_LID_EVENTS:-}" ]]; then print -r -- "$CLAUDE_BURST_TEST_LID_EVENTS"; return 0; fi
+  osascript -l JavaScript - <<'JXA'
+ObjC.import('IOKit'); ObjC.import('Foundation');
+var svc = $.IOServiceGetMatchingService(0, $.IOServiceMatching('IOPMrootDomain'));
+var key = $.CFStringCreateWithCString(0, 'AppleClamshellState', 0x08000100);
+var out = $.NSFileHandle.fileHandleWithStandardOutput;
+var last = '';
+while (true) {
+  var v = $.IORegistryEntryCreateCFProperty(svc, key, 0, 0);
+  var s = (v && $.CFBooleanGetValue(v)) ? 'shut' : 'open';
+  if (v) $.CFRelease(v);
+  if (s !== last || s === 'shut') out.writeData($(s + '\n').dataUsingEncoding($.NSUTF8StringEncoding));
+  last = s;
+  $.NSThread.sleepForTimeInterval(1);
+}
+JXA
+}
+
+# screen_step: act on one lid reading from lid_events. With the lid open it
+# starts no process at all. With it shut the decision (pmset, system_profiler)
+# is made on closing and then every DECIDE_EVERY seconds, not every second.
+screen_step() {
+  local lid=$1 now=$EPOCHSECONDS
+  [[ "$lid" == shut || "$lid" == open ]] || return 0
+  LID_NOW=$lid
   # Every closing is logged with what was decided, so a screen left lit
   # behind the lid shows why. On 3 Oct 2026 a closing left no line at all
   # and nothing could say whether it was missed or judged "leave".
-  local lid=open; lid_closed && lid=shut
   if [[ "$lid" != "$LID_SEEN" ]]; then
-    [[ -n "$LID_SEEN" && "$lid" == shut ]] && log "lid shut seen: SleepDisabled $(current), external displays $(external_displays), screen $(screen_decision)"
+    DECIDED_AT=0
+    if [[ -n "$LID_SEEN" && "$lid" == shut ]]; then
+      DECISION="$(screen_decision)"; DECIDED_AT=$now
+      log "lid shut seen: SleepDisabled $(current), external displays $(external_displays), screen $DECISION"
+    fi
     LID_SEEN=$lid
   fi
-  [[ "$lid" == open ]] && { rm -f "$DARK_FILE"; return 0; }
-  if [[ "$(screen_decision)" == off ]]; then
-    pmset displaysleepnow 2>/dev/null
+  if [[ "$lid" == open ]]; then
+    [[ -e "$DARK_FILE" ]] && rm -f "$DARK_FILE"
+    return 0
+  fi
+  (( now - DECIDED_AT >= DECIDE_EVERY )) && { DECISION="$(screen_decision)"; DECIDED_AT=$now; }
+  if [[ "$DECISION" == off ]]; then
+    if (( now - DARKENED_AT >= DARKEN_EVERY )); then
+      [[ -n "${CLAUDE_BURST_TEST_LID_EVENTS:-}" ]] && echo displaysleepnow || pmset displaysleepnow 2>/dev/null
+      DARKENED_AT=$now
+    fi
     [[ -f "$DARK_FILE" ]] || { touch "$DARK_FILE"; log "lid shut: screen off, the Mac stays awake"; }
   else
-    rm -f "$DARK_FILE"
+    [[ -e "$DARK_FILE" ]] && rm -f "$DARK_FILE"
   fi
+  return 0
 }
 
 set_sleep_disabled() {
   [[ "$(current)" == "$1" ]] && return 0
   pmset -a disablesleep "$1" || return 1
-  log "SleepDisabled -> $1 (power: $(power_source))"
+  log "SleepDisabled -> $1 (power: $POWER${BATT_PCT:+, battery $BATT_PCT%})"
+}
+
+# note_low_battery logs each change between "below the minimum" and not,
+# once: the marker file carries the state across reconciles.
+note_low_battery() {
+  if (( LOW )); then
+    [[ -e "$LOWBATT_FILE" ]] && return 0
+    touch "$LOWBATT_FILE" 2>/dev/null
+    log "battery $BATT_PCT% below $MIN%: lid-close sleep allowed"
+  elif [[ -e "$LOWBATT_FILE" ]]; then
+    rm -f "$LOWBATT_FILE"
+    if [[ "$POWER" == ac ]]; then log "on mains power: battery minimum no longer applies"
+    else log "battery $BATT_PCT% at or above $MIN%: battery minimum no longer applies"; fi
+  fi
 }
 
 daemon_uninstall() {
@@ -211,9 +314,20 @@ PLIST
 
 do_apply() {
   need_root apply
-  local mode="${1:-ac}" idle="${2:-0}" act="${3:-}"
+  # Positional MODE IDLE ACTIVITY as before; --min-battery N anywhere, so a
+  # caller that never passes it keeps working (and gets the default).
+  local -a pos; local minbatt=$DEFAULT_MIN_BATTERY
+  while (( $# )); do
+    case "$1" in
+      --min-battery) (( $# >= 2 )) || die "--min-battery needs a percentage"; minbatt="$2"; shift 2 ;;
+      --min-battery=*) minbatt="${1#*=}"; shift ;;
+      *) pos+=("$1"); shift ;;
+    esac
+  done
+  local mode="${pos[1]:-ac}" idle="${pos[2]:-0}" act="${pos[3]:-}"
   valid_mode "$mode" || die "power mode must be ac or always, got '$mode'"
   valid_idle "$idle" || die "idle minutes must be 0 to 1440, got '$idle'"
+  valid_minbatt "$minbatt" || die "minimum battery must be 0 to 100, got '$minbatt'"
   (( idle == 0 )) || valid_activity "$act" || die "activity file must be ~/.config/claude-burst/last-activity, got '$act'"
   local before; before="$(current)"
   [[ "$before" == 0 || "$before" == 1 ]] || die "could not read SleepDisabled from pmset -g (got '$before')"
@@ -223,6 +337,7 @@ do_apply() {
   [[ -f "$STATE_FILE" ]] || echo "$before" > "$STATE_FILE" || die "cannot write $STATE_FILE"
   echo "$mode" > "$MODE_FILE" || die "cannot write $MODE_FILE"
   echo "$idle" > "$IDLE_FILE" || die "cannot write $IDLE_FILE"
+  echo "$minbatt" > "$MINBATT_FILE" || die "cannot write $MINBATT_FILE"
   if (( idle > 0 )); then echo "$act" > "$ACT_FILE"; else rm -f "$ACT_FILE"; fi
   touch "$LIDOPEN_FILE"   # applying counts as use: the window starts now
 
@@ -231,20 +346,37 @@ do_apply() {
   else
     daemon_uninstall
   fi
-  set_sleep_disabled "$(desired_for "$mode")" || die "pmset -a disablesleep failed"
-  local want after; want="$(desired_for "$mode")"; after="$(current)"
+  compute_desired "$mode"
+  note_low_battery
+  set_sleep_disabled "$DESIRED" || die "pmset -a disablesleep failed"
+  local want after; compute_desired "$mode"; want="$DESIRED"; after="$(current)"
   [[ "$after" == "$want" ]] || die "SleepDisabled reads '$after', wanted '$want'"
-  log "applied mode=$mode idle=$idle"
+  log "applied mode=$mode idle=$idle min-battery=$minbatt"
   if (( idle > 0 )); then
     echo "lid-closed awake: ON, ${mode/ac/on mains power only}, for $idle minutes after Claude Code was last used or the lid was last open (SleepDisabled $after; was $before)"
     echo "  daemon $LABEL checks every minute; log: $LOG"
   elif [[ "$mode" == always ]]; then
-    echo "lid-closed awake: ON, always (SleepDisabled 1; was $before)"
+    echo "lid-closed awake: ON, always (SleepDisabled $after; was $before)"
   else
     echo "lid-closed awake: ON, on mains power only (now on $(power_source): SleepDisabled $after; was $before)"
     echo "  daemon $LABEL follows the power source; log: $LOG"
   fi
+  battery_line
   screen_line
+}
+
+# battery_line: the minimum, and what it does right now. Uses the last
+# compute_desired.
+battery_line() {
+  if (( MIN == 0 )); then
+    echo "minimum battery: off (no battery check)"
+  elif (( LOW )); then
+    echo "minimum battery: $MIN% (now $BATT_PCT% on battery, below it: lid-close sleep allowed)"
+  elif [[ "$POWER" == battery && -n "$BATT_PCT" ]]; then
+    echo "minimum battery: $MIN% (now $BATT_PCT% on battery: a shut lid sleeps the Mac below $MIN%)"
+  else
+    echo "minimum battery: $MIN% (on mains power now: a shut lid sleeps the Mac on battery below $MIN%)"
+  fi
 }
 
 # screen_line: which of the two is true right now, in so many words.
@@ -263,7 +395,7 @@ screen_line() {
 do_remove() {
   need_root remove
   daemon_uninstall
-  rm -f "$MODE_FILE" "$IDLE_FILE" "$ACT_FILE" "$LIDOPEN_FILE"
+  rm -f "$MODE_FILE" "$IDLE_FILE" "$ACT_FILE" "$LIDOPEN_FILE" "$MINBATT_FILE" "$LOWBATT_FILE"
   if [[ ! -f "$STATE_FILE" ]]; then
     echo "lid-closed awake: never applied by claude-burst; SleepDisabled left at $(current)"
     return 0
@@ -280,19 +412,23 @@ do_reconcile() {
   need_root reconcile
   local mode; mode="$(cat "$MODE_FILE" 2>/dev/null)"
   valid_mode "$mode" || return 0   # removed underneath us: touch nothing
-  set_sleep_disabled "$(desired_for "$mode")"
+  compute_desired "$mode"
+  note_low_battery
+  set_sleep_disabled "$DESIRED"
 }
 
 do_watch() {
   need_root watch
   do_reconcile
-  # The idle window needs a clock as well as power-source events.
-  ( while sleep 60; do do_reconcile; done ) &
+  # The idle window needs a clock as well as power-source events. zselect
+  # waits inside zsh, where `sleep` would start a process each time.
+  ( while true; do zselect -t 6000; do_reconcile; done ) &
   local clock=$!
   # The screen, every second: dark before anyone sees it lit behind the lid.
-  # Five seconds left it glowing long enough to look like no fix at all, and
-  # with the lid open each check is one ioreg call.
-  ( while sleep 1; do screen_check; done ) &
+  # Five seconds left it glowing long enough to look like no fix at all.
+  # If the lid watcher ever exits, so does the daemon, and launchd's
+  # KeepAlive restarts the lot.
+  ( lid_events | while IFS= read -r lid; do screen_step "$lid"; done; kill $$ ) &
   local screen=$!
   trap "kill $clock $screen 2>/dev/null" EXIT
   # pslog prints a line on every power-source change and keeps running.
@@ -302,7 +438,9 @@ do_watch() {
 
 do_status() {
   local mode; mode="$(cat "$MODE_FILE" 2>/dev/null)"
-  echo "SleepDisabled: $(current) (power: $(power_source))"
+  compute_desired "${mode:-ac}"
+  echo "SleepDisabled: $(current) (power: $POWER${BATT_PCT:+, battery $BATT_PCT%})"
+  battery_line
   local idle; idle="$(cat "$IDLE_FILE" 2>/dev/null)"
   if valid_idle "$idle" && (( idle > 0 )); then
     if in_use; then echo "idle window: $idle minutes, in use now"; else echo "idle window: $idle minutes, idle: lid-close sleep allowed"; fi
@@ -324,13 +462,15 @@ do_status() {
 }
 
 case "${1:-}" in
-  apply)     do_apply "${2:-ac}" "${3:-0}" "${4:-}" ;;
+  apply)     shift; do_apply "$@" ;;
   remove)    do_remove ;;
   status)    do_status ;;
   desired)   valid_mode "${2:-ac}" || die "mode must be ac or always"; desired_for "${2:-ac}" ;;
   screen)    screen_decision ;;
   screen-line) screen_line ;;
   reconcile) do_reconcile ;;
+  screen-steps) # tests only: feed CLAUDE_BURST_TEST_LID_EVENTS through screen_step, no root
+    mkdir -p "$STATE_DIR"; lid_events | while IFS= read -r lid; do screen_step "$lid"; done ;;
   watch)     do_watch ;;
-  *) echo "usage: sudo $SELF apply [ac|always] | remove   |   $SELF status | desired [ac|always]" >&2; exit 2 ;;
+  *) echo "usage: sudo $SELF apply [ac|always] [IDLE ACTIVITY] [--min-battery N] | remove   |   $SELF status | desired [ac|always]" >&2; exit 2 ;;
 esac

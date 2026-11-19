@@ -92,7 +92,7 @@ type CompactionConfig struct {
 	// none at all. Everything else (the warning percentage, the delay
 	// between compactions, mid-turn) applies to the repository's own limit.
 	RepoOverrides []RepoCompaction `json:"repo_overrides,omitempty"`
-	// Mode is how Compact at is chosen. "" is fixed: CompactAtTokens for
+	// Mode is how Compact at is chosen. CompactionFixed: CompactAtTokens for
 	// every repository without an override. CompactionIntelligent learns a
 	// Compact at for each repository from what its compactions cost and
 	// saved (internal/autocompact), adjusted once a day, never below
@@ -113,6 +113,12 @@ type CompactionConfig struct {
 
 // CompactionIntelligent is CompactionConfig.Mode for a learned Compact at.
 const CompactionIntelligent = "intelligent"
+
+// CompactionFixed is CompactionConfig.Mode for one Compact at for every
+// repository. It has to be written out: since 17 Nov 2026 Default() is
+// intelligent and Load starts from Default(), so a config.json with no mode
+// (every one written before, as "" was fixed then) is intelligent too.
+const CompactionFixed = "fixed"
 
 // Intelligent reports whether Compact at is learned per repository.
 func (c CompactionConfig) Intelligent() bool { return c.Mode == CompactionIntelligent }
@@ -168,16 +174,17 @@ func (c CompactionConfig) ForRepo(root string) (CompactionConfig, *RepoCompactio
 }
 
 // StartTokens is the size a repository compacts at in the intelligent mode
-// before anything has been learned for it: the middle of the range, since
-// the top of it (500k of a 100k to 500k range) is the most a guess can
-// cost. In the fixed mode it is Compact at.
+// before anything has been learned for it: 300k, the fixed mode's default,
+// kept inside the range. It used to be the middle of the range, so a ceiling
+// of 700k started every new repository at 400k while it was still learning;
+// since 17 Nov 2026 a guess is always the size Burst ships as its fixed one.
+// In the fixed mode it is Compact at.
 func (c CompactionConfig) StartTokens() int64 {
 	c = c.Resolved()
 	if !c.Intelligent() || c.FloorTokens >= c.CompactAtTokens {
 		return c.CompactAtTokens
 	}
-	const step = 5_000
-	return (c.FloorTokens + c.CompactAtTokens + step) / 2 / step * step
+	return min(max(int64(DefaultCompactionCompactAt), c.FloorTokens), c.CompactAtTokens)
 }
 
 // unlearned is c for a repository with no override and nothing learned.
@@ -572,6 +579,14 @@ type Config struct {
 	// 0 (default) keeps it awake for as long as the power mode applies.
 	KeepAwakeIdleMinutes int `json:"keep_awake_idle_minutes,omitempty"`
 
+	// KeepAwakeMinBattery lets the Mac sleep with the lid shut anyway while
+	// it is on battery below this charge, in percent, whatever the power
+	// mode and idle window say. nil is the default
+	// (DefaultKeepAwakeMinBattery, also for a config.json written before the
+	// setting existed); 0 turns the check off. Read it through
+	// KeepAwakeMinBatteryPercent.
+	KeepAwakeMinBattery *int `json:"keep_awake_min_battery,omitempty"`
+
 	// AdminHostname is an optional friendly name for the admin UI, e.g.
 	// "cloudscale-claudeburst.test", paired with an /etc/hosts entry pointing
 	// it at 127.0.0.1.
@@ -593,19 +608,95 @@ type Config struct {
 	// once per day per level. 0 is off. Read live.
 	AlertDailySpendUSD float64 `json:"alert_daily_spend_usd,omitempty"`
 
+	// Alerts is where the gateway's alerts go and how many of them: the
+	// on-screen toasts (usage panel, mod) and macOS Notification Center.
+	// Read live. An absent block is the defaults (AlertsConfig).
+	Alerts AlertsConfig `json:"alerts,omitempty"`
+
 	// Hotspot joins a named Wi-Fi network when this Mac is offline, so a
 	// session left running with the lid shut can reach Anthropic from a
 	// phone's hotspot. Read live, no restart needed. See internal/hotspot.
 	Hotspot HotspotConfig `json:"hotspot,omitempty"`
 }
 
-// NotifyConfig is retired: Burst no longer sends macOS notifications (the
-// usage panel's on-screen alerts replaced them on 3 Oct 2026). Kept so a
-// config.json that still has a "notify" block reads and saves unchanged.
+// NotifyConfig is retired: it set the osascript notifications that the
+// usage panel's on-screen alerts replaced on 3 Oct 2026 (Notification
+// Center is now AlertsConfig). Kept so a config.json that still has a
+// "notify" block reads and saves unchanged.
 type NotifyConfig struct {
 	Failover   bool `json:"failover,omitempty"`   // requests move to the secondary, and back
 	Compaction bool `json:"compaction,omitempty"` // Burst compacted a session
 	Guards     bool `json:"guards,omitempty"`     // a guard repaired or removed the redirect
+}
+
+// Alert levels for one delivery channel (AlertChannel.Level).
+const (
+	AlertLevelOff      = "off"      // nothing goes out on this channel
+	AlertLevelCritical = "critical" // errors and the few kinds that need a person now
+	AlertLevelAll      = "all"      // every alert
+)
+
+// AlertChannel is one way an alert reaches the person. Level "" is the
+// channel's own default (AlertsConfig), so a config.json written before
+// this existed keeps today's behaviour: every alert as a toast.
+type AlertChannel struct {
+	Level string `json:"level,omitempty"`
+}
+
+// AlertsConfig picks the delivery channels and their levels.
+//
+// Toasts are the floating notices the usage panel and the mod show, from
+// notices.json; their default is all, as before this setting. Notification
+// Center is macOS's own banner, posted by the notifier helper inside the
+// Claude Burst app; its default is critical only, so it is a second line
+// for what must not be missed (Burst bypassed, requests failing) rather
+// than a copy of every toast. Where nothing shows the toasts (a Claude
+// Desktop user), its default is all: NotificationCenterLevelFor.
+type AlertsConfig struct {
+	Toasts             AlertChannel `json:"toasts,omitempty"`
+	NotificationCenter AlertChannel `json:"notification_center,omitempty"`
+}
+
+// ValidAlertLevel reports whether v is a level a channel may be set to;
+// "" is the channel's default.
+func ValidAlertLevel(v string) bool {
+	switch v {
+	case "", AlertLevelOff, AlertLevelCritical, AlertLevelAll:
+		return true
+	}
+	return false
+}
+
+func alertLevel(v, def string) string {
+	switch v {
+	case AlertLevelOff, AlertLevelCritical, AlertLevelAll:
+		return v
+	}
+	// "" and anything a hand edit got wrong: the default, never off. A typo
+	// must not be what silences Burst's alerts.
+	return def
+}
+
+// ToastLevel is the toasts' level with its default filled in.
+func (a AlertsConfig) ToastLevel() string { return alertLevel(a.Toasts.Level, AlertLevelAll) }
+
+// NotificationCenterLevel is Notification Center's level with its default
+// filled in, on a Mac where something shows the toasts.
+func (a AlertsConfig) NotificationCenterLevel() string {
+	return alertLevel(a.NotificationCenter.Level, AlertLevelCritical)
+}
+
+// NotificationCenterLevelFor is Notification Center's level given whether
+// anything on this Mac shows the toasts (the usage panel, the mod). Where
+// nothing does, as for someone who uses Claude Code only through Claude
+// Desktop, Notification Center is the only place an alert can be seen, so
+// its default is all rather than critical only (17 Nov 2026). A level the
+// person chose is kept either way.
+func (a AlertsConfig) NotificationCenterLevelFor(toastsShown bool) string {
+	if toastsShown {
+		return a.NotificationCenterLevel()
+	}
+	return alertLevel(a.NotificationCenter.Level, AlertLevelAll)
 }
 
 // Values for HotspotConfig.When.
@@ -744,6 +835,11 @@ func Default() Config {
 		ResetGraceSeconds:   10,
 		UnknownResetSeconds: 300,
 		MaxRequestMB:        128,
+		// Intelligent by default: each repository's Compact at is learned,
+		// starting at 300k while it learns (StartTokens). Load starts from
+		// here, so a config.json with no mode is intelligent; the fixed mode
+		// is written out as CompactionFixed.
+		PrimaryCompaction: CompactionConfig{Mode: CompactionIntelligent},
 
 		KeepAwakeLidClosedPower: KeepAwakeOnAC,
 		KeychainService:         "claude-burst-bedrock",
@@ -937,6 +1033,23 @@ func (c *Config) ValidateIntercept() error {
 // MaxKeepAwakeIdleMinutes is a day, the most lid-awake-root.sh accepts.
 const MaxKeepAwakeIdleMinutes = 1440
 
+// DefaultKeepAwakeMinBattery is the charge below which a Mac on battery
+// sleeps with the lid shut even with keep-awake on: a closed laptop kept
+// awake in a bag should not run itself flat.
+const DefaultKeepAwakeMinBattery = 50
+
+// MaxKeepAwakeMinBattery is the most lid-awake-root.sh accepts.
+const MaxKeepAwakeMinBattery = 100
+
+// KeepAwakeMinBatteryPercent is KeepAwakeMinBattery with the default
+// filled in: 0 (no check) to 100.
+func (c Config) KeepAwakeMinBatteryPercent() int {
+	if c.KeepAwakeMinBattery == nil {
+		return DefaultKeepAwakeMinBattery
+	}
+	return *c.KeepAwakeMinBattery
+}
+
 // ValidateKeepAwakePower rejects an unknown power mode rather than guessing:
 // "always" read as "ac" would let the Mac sleep when the user expected it not
 // to, and the reverse would keep it awake on battery in a bag.
@@ -1081,6 +1194,9 @@ func loadFile(p string) (Config, error) {
 	}
 	if cfg.KeepAwakeIdleMinutes < 0 || cfg.KeepAwakeIdleMinutes > MaxKeepAwakeIdleMinutes {
 		return cfg, fmt.Errorf("parse %s: keep_awake_idle_minutes must be 0 to %d, got %d", p, MaxKeepAwakeIdleMinutes, cfg.KeepAwakeIdleMinutes)
+	}
+	if n := cfg.KeepAwakeMinBatteryPercent(); n < 0 || n > MaxKeepAwakeMinBattery {
+		return cfg, fmt.Errorf("parse %s: keep_awake_min_battery must be 0 to %d, got %d", p, MaxKeepAwakeMinBattery, n)
 	}
 	return cfg, nil
 }

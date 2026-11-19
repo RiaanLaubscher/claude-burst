@@ -186,6 +186,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/alert-test", s.mutating(s.handleAlertTest))
 	mux.HandleFunc("/api/alert", s.mutating(s.handleAlertPublish))
 	mux.HandleFunc("/api/alert-spend", s.mutating(s.handleAlertSpend))
+	mux.HandleFunc("/api/alert-channels", s.handleAlertChannels)
+	mux.HandleFunc("/api/alert-test-nc", s.mutating(s.handleAlertTestNC))
 	mux.HandleFunc("/api/statusline", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			s.readOnly(s.handleStatusLineGet)(w, r)
@@ -391,6 +393,13 @@ func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// probeClient is a client that opens a new connection for every request. The
+// dashboard's Test connection and the console's redirect check ask where the
+// intercepted host goes now, so each must look it up again. On Go's pooled
+// default transport, a gateway started while /etc/hosts lacked the redirect
+// kept its connection to the real Anthropic, and both checks went on saying
+// "NOT from this gateway" after the redirect was back, until a restart
+// (14 Oct 2026).
 func probeClient(timeout time.Duration) *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.DisableKeepAlives = true

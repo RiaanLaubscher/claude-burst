@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+// Two probes open two connections: a connection kept from before the
+// redirect changed cannot answer for the second one.
 func TestProbeClientDialsFreshEachTime(t *testing.T) {
 	t.Parallel()
 	var conns atomic.Int32

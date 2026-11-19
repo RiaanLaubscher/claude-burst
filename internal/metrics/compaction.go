@@ -166,10 +166,12 @@ type compactionTracker struct {
 	sessions map[sessionModel]*trackedSession
 }
 
+// sessionModel keys a tracked session. A struct key is built without an
+// allocation; session + "|" + model was allocated for every event replayed.
 type sessionModel struct{ session, model string }
 
 type trackedSession struct {
-	key           string
+	key           string // session|model for compactionEffect, made once
 	lastCtx       int64
 	lastCompacted int64 // CompactedMessages of the previous request
 	twin          int64 // the context without Burst; 0 until known

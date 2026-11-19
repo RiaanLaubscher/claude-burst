@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -41,6 +40,12 @@ type Event struct {
 	// this request was sent to -- what actually answers "did this go to
 	// primary or secondary", independent of the Slot label.
 	Destination string `json:"destination,omitempty"`
+	// Client is the Claude Code front end that sent the request, from its
+	// User-Agent (internal/desktop.ClientOf): "cli", "claude-desktop",
+	// "cowork", "sdk". Recorded from 17 Nov 2026 so a Claude Desktop user
+	// can see their sessions go through Burst at all: nothing else in the
+	// gateway's records told the Code tab apart from the terminal.
+	Client string `json:"client,omitempty"`
 	// HTTPStatus is what the client was answered. A request that never got
 	// an upstream answer records the status the gateway sent (502), and one
 	// the client abandoned records StatusClientClosed. Until 2026-10-03 both
@@ -418,6 +423,16 @@ type History struct {
 	Files int `json:"files"`
 }
 
+// dayNum is t's local calendar day as yyyymmdd, the key the daily buckets
+// are found by. It names the same day as t.Local().Format("2006-01-02")
+// without making a string: Daily, OverflowSince, CompactionStatsSince and
+// the strategy sweep look a day up for every event they read, and that
+// string was 61% of Daily's allocations (BenchmarkDaily14).
+func dayNum(t time.Time) int {
+	y, m, d := t.Local().Date()
+	return y*10000 + int(m)*100 + d
+}
+
 // Daily reads the metrics log and its rotated backups and buckets the last
 // `days` local days.
 //
@@ -426,11 +441,6 @@ type History struct {
 // first rotation. Backups whose last write predates the window are skipped
 // without opening them: events are appended in time order, so a file's
 // mtime is its newest event.
-func dayNum(t time.Time) int {
-	y, m, d := t.Local().Date()
-	return y*10000 + int(m)*100 + d
-}
-
 func Daily(path string, days int) (History, error) {
 	if days <= 0 {
 		days = 14
@@ -682,8 +692,11 @@ func percentile(v []int64, p float64) int64 {
 	if len(v) == 0 {
 		return 0
 	}
-	slices.Sort(v)
-	i := max(int(float64(len(v))*p+0.5)-1, 0)
+	sort.Slice(v, func(i, j int) bool { return v[i] < v[j] })
+	i := int(float64(len(v))*p+0.5) - 1
+	if i < 0 {
+		i = 0
+	}
 	if i >= len(v) {
 		i = len(v) - 1
 	}
