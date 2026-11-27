@@ -10,7 +10,7 @@ import (
 	"github.com/andrewbakercloudscale/claude-burst/internal/touchid"
 )
 
-const version = "0.20.65"
+const version = "0.20.73"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -83,7 +83,7 @@ func usage() {
 Commands:
   serve             Run the local gateway (default: 127.0.0.1:7777)
   configure         Write/update config.json
-  keychain-set      Store a secondary's API key in macOS Keychain (--provider together|openrouter|bedrock)
+  keychain-set      Store an API key in macOS Keychain (--provider <vendor>, e.g. groq or openrouter)
   enable            Point Claude Code at the local gateway via ~/.claude/settings.json
   disable           Remove Claude Burst from Claude Code settings
   ca-rotate         Replace the local intercept CA (only with no Claude Code session running)
@@ -99,6 +99,7 @@ Commands:
   restore-config    Put back the newest backup of config.json that loads, when the one in place does not
   console           support console: audit, log, restart and repair, up when the gateway is not (127.0.0.1:7789)
   open              Open the dashboard in the browser, or the support console when the gateway is down
+                    (--console: the support console only)
   app               The Claude Burst app in ~/Applications (Spotlight, Dock) that does the same: install, remove
   version           Print version
 

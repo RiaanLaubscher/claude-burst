@@ -163,9 +163,11 @@ func newGetRig(t *testing.T) *getRig {
 	return r
 }
 
+// core.hooksPath=/dev/null: the developer's own git hooks (a secret scanner
+// reading the rig's random test keys, say) are not part of the test.
 func (r *getRig) git(dir string, args ...string) string {
 	r.t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"}, args...)...)
+	cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"}, args...)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		r.t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -334,7 +336,7 @@ func TestGetFreshMacInstallsGoWithHomebrewAndRerunsCleanly(t *testing.T) {
 	}
 	wantIn(t, "calls", calls, "brew install go", "install.sh mode=transparent force=1 signing=no from "+filepath.Join(r.home, "claude-burst")+" at v2")
 	wantNotIn(t, "calls", calls, "installer -pkg", "curl")
-	wantIn(t, "output", out, "on release v2", "DONE: Claude Burst is installed and working", "./install.sh uninstall", "burst-off")
+	wantIn(t, "output", out, "on release v2", "DONE: Claude Burst is installed and working", "Remove:     "+filepath.Join(r.home, "claude-burst", "install.sh")+" uninstall", "burst-off")
 	if n := strings.Count(calls, "sudo -v"); n != 1 {
 		t.Errorf("want the password asked for once, got %d:\n%s", n, calls)
 	}
