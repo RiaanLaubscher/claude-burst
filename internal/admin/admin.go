@@ -86,6 +86,8 @@ type Server struct {
 	// running on.
 	storeKey func(service, value string) error
 	keyInfo  func(service, envVar string) keychain.Info
+	// keyInfos holds keyInfo's last answer for /api/state; see keyInfoTTL.
+	keyInfos keyInfoCache
 	loadKey  func(service, envVar string) (string, error)
 	// authenticate gates the one endpoint that hands out a secret. A field
 	// so tests can drive both answers: a gate that is only ever exercised
@@ -155,6 +157,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/inspect/prune", s.mutating(s.handleInspectPrune))
 	mux.HandleFunc("/api/inspect/refresh", s.mutating(s.handleInspectRefresh))
 	mux.HandleFunc("/api/handoff/taken", s.mutating(s.handleHandoffTaken))
+	mux.HandleFunc("/api/mod/down", s.mutating(s.handleModDown))
 	mux.HandleFunc("/api/automask-save", s.mutating(s.handleAutomaskSave))
 	mux.HandleFunc("/api/compaction/repo", s.mutating(s.handleCompactionRepo))
 	mux.HandleFunc("/api/compaction/drop", s.mutating(s.handleCompactionDrop))
@@ -279,10 +282,21 @@ func (s *Server) handleRequests(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if events == nil {
-		events = []metrics.Event{} // the page reads .length, so an empty log is [] and never null
+	// Each row says whether this Mac's network dropped it, so the list can
+	// label it "network" rather than show a bare 502 that reads as Burst
+	// failing.
+	rows := make([]requestRow, 0, len(events)) // the page reads .length, so an empty log is [] and never null
+	for _, e := range events {
+		rows = append(rows, requestRow{Event: e, Network: metrics.NetworkKind(e)})
 	}
-	writeJSON(w, events)
+	writeJSON(w, rows)
+}
+
+// requestRow is one /api/requests row: the event, plus the network failure
+// it was (metrics.NetworkKind), if any.
+type requestRow struct {
+	metrics.Event
+	Network string `json:"network,omitempty"`
 }
 
 func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
